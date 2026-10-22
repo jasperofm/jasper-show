@@ -23,7 +23,7 @@ final class EditSettingsTests: XCTestCase {
     func testNormalizedClampsValues() {
         var s = EditSettings()
         s.zoom = 10; s.speed = 0.1; s.brightness = 5
-        s.crop = CGRect(x: 0.9, y: 0.9, width: 0.5, height: 0.5) // mostly outside → too small → reset
+        s.crop = CGRect(x: 0.98, y: 0.98, width: 0.5, height: 0.5) // clipped to 2% → under the 5% minimum → reset
         let n = s.normalized(sourceDuration: 10)
         XCTAssertEqual(n.zoom, 4)
         XCTAssertEqual(n.speed, 0.5)
