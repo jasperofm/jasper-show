@@ -87,8 +87,8 @@ public enum ScheduleExport {
     }
 
     static func escape(_ s: String) -> String {
-        s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: ";", with: "\;")
-            .replacingOccurrences(of: ",", with: "\\,").replacingOccurrences(of: "\n", with: "\\n")
+        s.replacingOccurrences(of: #"\"#, with: #"\\"#).replacingOccurrences(of: ";", with: #"\;"#)
+            .replacingOccurrences(of: ",", with: #"\,"#).replacingOccurrences(of: "\n", with: #"\n"#)
     }
 
     /// RFC 5545: lines longer than 75 octets are folded.
