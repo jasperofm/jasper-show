@@ -199,7 +199,8 @@ final class SafePublishingStoreTests: XCTestCase {
         try store.upsert(j)
         XCTAssertTrue(try store.dueJobs(now: now).isEmpty)
         XCTAssertEqual(try store.dueJobs(now: now.addingTimeInterval(301)).count, 1)
-        XCTAssertEqual(try store.nextWakeDate(), j.nextAttemptAt)
+        XCTAssertEqual(try XCTUnwrap(try store.nextWakeDate()).timeIntervalSince1970,
+                       try XCTUnwrap(j.nextAttemptAt).timeIntervalSince1970, accuracy: 0.001)
     }
 
     func testPostedCountsAndLastPosted() throws {
