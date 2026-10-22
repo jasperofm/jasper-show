@@ -37,7 +37,7 @@ final class PreviewController: ObservableObject {
         box = SettingsBox(settings)
         player.actionAtItemEnd = .pause
         timeObserver = player.addPeriodicTimeObserver(forInterval: CMTime(value: 1, timescale: 30), queue: .main) { [weak self] t in
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.currentTime = t.seconds.isFinite ? t.seconds : 0
                 self.isPlaying = self.player.rate != 0

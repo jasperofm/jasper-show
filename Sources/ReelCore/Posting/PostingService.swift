@@ -139,8 +139,8 @@ public final class PostingService {
             let client = accounts.client(for: account.platform)
             let result: PublishResult
             do {
-                result = try await client.publish(request, tokens: tokens) { [weak self] stage in
-                    Task { @MainActor in self?.onProgress?(jobID, stage) }
+                result = try await client.publish(request, tokens: tokens) { stage in
+                    Task { @MainActor in self.onProgress?(jobID, stage) }
                 }
             } catch let e as PlatformError {
                 if let ra = e.retryAfter ?? (e.httpStatus == 429 ? 900 : nil) { await limiter.block(account, for: ra) }
