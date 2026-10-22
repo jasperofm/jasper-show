@@ -46,8 +46,14 @@ public final class AccountService {
             account.status = .connected
             account.statusMessage = nil
             account.lastSyncAt = Date()
+            // A fresh sign-in clears any pause the old token caused.
+            account.isPaused = false
+            account.pauseReason = nil
+            account.consecutiveFailures = 0
+            account.tokenExpiresAt = item.tokens.refreshToken == nil ? item.tokens.expiresAt : nil
             try keychain.save(item.tokens, for: account.keychainKey)
             try store.upsert(account)
+            store.log(.auth, "Connected \(platform.displayName) account \(account.handle).", accountID: account.id)
             out.append(account)
         }
         return out
@@ -66,21 +72,56 @@ public final class AccountService {
     }
 
     /// Returns a usable access token, refreshing first if it is about to expire.
-    /// Marks the account as errored if the token can't be recovered.
+    /// Tokens without a refresh token (Instagram's 60-day token) are renewed
+    /// a week early. If the token can't be recovered the account is paused:
+    /// the only way back is signing in again through the platform.
     public func validTokens(for account: Account) async throws -> OAuthTokens {
         guard let tokens = try keychain.load(OAuthTokens.self, for: account.keychainKey) else {
-            try mark(account, .error, "Not signed in. Reconnect this account.")
+            try pauseForSignIn(account, "Not signed in. Reconnect this account.")
             throw PlatformError(platform: account.platform, message: "Not signed in", requiresReauth: true)
         }
-        guard tokens.isExpired() else { return tokens }
+        let margin: TimeInterval = tokens.refreshToken == nil ? 7 * 24 * 3600 : 120
+        guard tokens.isExpired(margin: margin) else { return tokens }
         do {
             let fresh = try await clients(account.platform).refresh(tokens, config: configs.config(for: account.platform))
             try keychain.save(fresh, for: account.keychainKey)
+            if fresh.refreshToken == nil, var a = try store.account(id: account.id) {
+                a.tokenExpiresAt = fresh.expiresAt
+                try store.upsert(a)
+            }
             return fresh
         } catch let e as PlatformError where e.requiresReauth || e.httpStatus == 400 || e.httpStatus == 401 {
-            try mark(account, .error, "Sign-in expired. Reconnect this account.")
+            // An early renewal that failed still leaves a working token.
+            if !tokens.isExpired() { return tokens }
+            try pauseForSignIn(account, "Sign-in expired and couldn't be renewed. Reconnect this account.")
             throw PlatformError(platform: account.platform, httpStatus: e.httpStatus, message: e.message, requiresReauth: true)
         }
+    }
+
+    /// Marks the account as needing a new sign-in and pauses it.
+    public func pauseForSignIn(_ account: Account, _ message: String) throws {
+        var a = (try store.account(id: account.id)) ?? account
+        a.status = .error
+        a.statusMessage = message
+        let wasPaused = a.isPaused
+        a.isPaused = true
+        a.pauseReason = message
+        try store.upsert(a)
+        if !wasPaused { store.log(.pause, "Paused \(a.handle): \(message)", accountID: a.id) }
+        onPaused?(a)
+    }
+
+    /// Called when an account is paused automatically.
+    public var onPaused: ((Account) -> Void)?
+
+    public func setPaused(_ account: Account, _ paused: Bool, reason: String? = nil) throws {
+        guard var a = try store.account(id: account.id) else { return }
+        a.isPaused = paused
+        a.pauseReason = paused ? (reason ?? "Paused by you.") : nil
+        if !paused { a.consecutiveFailures = 0 }
+        try store.upsert(a)
+        store.log(paused ? .pause : .resume, paused ? "Paused \(a.handle): \(a.pauseReason ?? "")" : "Resumed \(a.handle).",
+                  accountID: a.id)
     }
 
     /// "Sync accounts": re-reads each profile to confirm the token still works.
@@ -88,7 +129,7 @@ public final class AccountService {
         do {
             let t = try await validTokens(for: account)
             let p = try await clients(account.platform).fetchProfile(tokens: t)
-            var a = account
+            var a = (try store.account(id: account.id)) ?? account
             a.username = p.username
             a.status = .connected
             a.statusMessage = nil
@@ -100,7 +141,7 @@ public final class AccountService {
     }
 
     public func mark(_ account: Account, _ status: AccountStatus, _ message: String?) throws {
-        var a = account
+        var a = (try store.account(id: account.id)) ?? account
         a.status = status
         a.statusMessage = message
         try store.upsert(a)

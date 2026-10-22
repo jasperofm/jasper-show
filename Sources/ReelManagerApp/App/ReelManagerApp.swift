@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 
-@main
 struct ReelManagerApp: App {
     @StateObject private var app = AppState()
 
@@ -11,7 +10,7 @@ struct ReelManagerApp: App {
     }
 
     var body: some Scene {
-        WindowGroup("Reel Manager") {
+        WindowGroup("Reel Manager", id: "main") {
             ContentView()
                 .environmentObject(app)
                 .frame(minWidth: 1100, minHeight: 700)
@@ -48,6 +47,11 @@ struct ReelManagerApp: App {
                     .keyboardShortcut("r", modifiers: [.command, .shift])
                 Divider()
                 Button("Refresh Stats") { Task { await app.syncStats() } }
+                Divider()
+                Toggle("Pause All Publishing", isOn: Binding(get: { app.rules.killSwitch }, set: { app.setKillSwitch($0) }))
+                    .keyboardShortcut(".", modifiers: [.command, .shift])
+                Button("Activity Log") { app.showActivity = true }
+                    .keyboardShortcut("l", modifiers: [.command, .shift])
             }
             CommandGroup(replacing: .help) {
                 Button("Reel Manager Help") { app.showHelp = true }
@@ -57,6 +61,14 @@ struct ReelManagerApp: App {
         Settings {
             SettingsView()
                 .environmentObject(app)
+        }
+
+        // Kill switch and status in the menu bar. Stays while the app runs,
+        // even after its window is closed.
+        MenuBarExtra {
+            PublisherMenu().environmentObject(app)
+        } label: {
+            Image(systemName: app.rules.killSwitch ? "pause.circle.fill" : "paperplane.circle")
         }
     }
 }

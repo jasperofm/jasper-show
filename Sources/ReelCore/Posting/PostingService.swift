@@ -2,6 +2,7 @@ import Foundation
 
 public enum PostingError: Error, LocalizedError {
     case notExported, exportMissing, accountNotConnected(String), alreadyRunning, alreadyPosted, notFound
+    case notApproved, paused(String)
 
     public var errorDescription: String? {
         switch self {
@@ -11,6 +12,8 @@ public enum PostingError: Error, LocalizedError {
         case .alreadyRunning: return "This post is already uploading."
         case .alreadyPosted: return "This variation was already posted to this account."
         case .notFound: return "Post not found."
+        case .notApproved: return "Approve this post before it can be scheduled or published."
+        case .paused(let why): return why
         }
     }
 }
@@ -37,6 +40,8 @@ public final class PostingService {
     public var onProgress: ((UUID, PublishStage) -> Void)?
     /// Called after every attempt with the updated job.
     public var onFinished: ((PostJob) -> Void)?
+    /// Called when repeated failures pause an account.
+    public var onAccountPaused: ((Account) -> Void)?
 
     public init(store: LibraryStore, accounts: AccountService, limiter: RateLimiter = RateLimiter(),
                 retryPolicy: RetryPolicy = RetryPolicy(), automaticRetry: Bool = true) {
@@ -57,6 +62,16 @@ public final class PostingService {
         for account in targets {
             if var j = existing.first(where: { $0.accountID == account.id && $0.status != .cancelled }) {
                 if j.status != .posted && !j.status.isActive {
+                    // Edited content needs approving again.
+                    if j.caption != caption || j.title != title || j.privacy != privacy || j.overlay != overlay {
+                        j.approvedAt = nil
+                        if j.status == .scheduled || j.status == .held {
+                            j.status = .pending
+                            j.scheduledAt = nil
+                            j.nextAttemptAt = nil
+                            j.holdReason = nil
+                        }
+                    }
                     j.caption = caption
                     j.title = title
                     j.privacy = privacy
@@ -82,22 +97,76 @@ public final class PostingService {
     public func schedule(_ jobs: [PostJob], at dates: [Date]) throws -> UUID {
         let batch = UUID()
         for (job, date) in zip(jobs, dates) {
-            guard var j = try store.job(id: job.id), j.status != .posted, !running.contains(j.id) else { continue }
+            guard var j = try store.job(id: job.id), j.isApproved, j.status != .posted, !j.status.isActive,
+                  !running.contains(j.id) else { continue }
             j.status = .scheduled
+            j.holdReason = nil
             j.scheduledAt = date
             j.nextAttemptAt = nil
             j.batchID = batch
             j.updatedAt = Date()
             try store.upsert(j)
+            store.log(.schedule, "Scheduled for \(date.formatted(date: .abbreviated, time: .shortened)).",
+                      jobID: j.id, accountID: j.accountID)
         }
         onChange?()
         return batch
     }
 
+    /// Marks drafts as approved. Only approved posts can be scheduled or
+    /// published; AI-written or queued drafts always need this step.
+    public func approve(_ jobs: [PostJob], now: Date = Date()) throws {
+        for job in jobs {
+            guard var j = try store.job(id: job.id), !j.isApproved, !j.status.isTerminal else { continue }
+            j.approvedAt = now
+            j.updatedAt = now
+            try store.upsert(j)
+            store.log(.approval, "Approved for posting.", jobID: j.id, accountID: j.accountID)
+        }
+        onChange?()
+    }
+
+    /// Takes approval back; a scheduled post returns to draft.
+    public func unapprove(_ job: PostJob) throws {
+        guard var j = try store.job(id: job.id), !j.status.isActive, !j.status.isTerminal else { return }
+        j.approvedAt = nil
+        j.status = .pending
+        j.scheduledAt = nil
+        j.nextAttemptAt = nil
+        j.holdReason = nil
+        j.updatedAt = Date()
+        try store.upsert(j)
+        onChange?()
+    }
+
+    /// A rule or condition is keeping a due post back. Rechecked at `until`.
+    public func hold(_ job: PostJob, reason: String, until: Date) throws {
+        guard var j = try store.job(id: job.id), !j.status.isActive, !j.status.isTerminal else { return }
+        let changed = j.status != .held || j.holdReason != reason
+        j.status = .held
+        j.holdReason = reason
+        j.nextAttemptAt = until
+        j.updatedAt = Date()
+        try store.upsert(j)
+        if changed { store.log(.hold, "Held: \(reason)", jobID: j.id, accountID: j.accountID) }
+        if changed { onChange?() }
+    }
+
+    /// Forgets where an earlier attempt got to, so the next try starts a
+    /// fresh upload. Only for when the user has checked the account and the
+    /// post isn't there.
+    public func startOver(_ job: PostJob) throws {
+        guard !running.contains(job.id) else { throw PostingError.alreadyRunning }
+        try store.saveCheckpoint(nil, jobID: job.id)
+        store.log(.system, "Starting over: the earlier attempt was checked and discarded.", jobID: job.id, accountID: job.accountID)
+        onChange?()
+    }
+
     /// Takes a job off the schedule; it goes back to pending.
     public func unschedule(_ job: PostJob) throws {
-        guard var j = try store.job(id: job.id), j.status == .scheduled || j.status == .failed else { return }
+        guard var j = try store.job(id: job.id), [.scheduled, .failed, .held].contains(j.status) else { return }
         j.status = .pending
+        j.holdReason = nil
         j.scheduledAt = nil
         j.nextAttemptAt = nil
         j.updatedAt = Date()
@@ -137,41 +206,65 @@ public final class PostingService {
     }
 
     /// Sends one job now. Never throws: the outcome is written to the job
-    /// (status, lastError) and the attempt log, and the updated job returned.
+    /// (status, lastError), the attempt log and the event log, and the
+    /// updated job returned.
+    ///
+    /// Safety: only approved jobs are sent; the kill switch and account
+    /// pauses always apply; the job is claimed atomically in the database so
+    /// two processes can't send it at once; and a job with a checkpoint is
+    /// checked against the platform before anything is uploaded again.
     @discardableResult
     public func send(jobID: UUID) async -> PostJob? {
         guard var job = try? store.job(id: jobID) else { return nil }
-        if running.contains(jobID) || job.status == .cancelled { return job }
+        if running.contains(jobID) || job.status == .cancelled || job.status == .posted { return job }
+        guard job.isApproved else {
+            job.lastError = PostingError.notApproved.localizedDescription
+            return job
+        }
+        let rules = PublishRules.load(from: store)
+        let account = try? store.account(id: job.accountID)
+        if rules.killSwitch || account?.isPaused == true {
+            let why = rules.killSwitch ? "All publishing is paused (kill switch)."
+                : "\(account?.handle ?? "This account") is paused" + (account?.pauseReason.map { ": \($0)" } ?? ".")
+            try? hold(job, reason: why, until: Date().addingTimeInterval(PublishGate.recheckInterval))
+            return try? store.job(id: jobID)
+        }
+        guard (try? store.claim(jobID: jobID)) == true else { return job }
         running.insert(jobID)
         defer {
             running.remove(jobID)
             onChange?()
             if let done = try? store.job(id: jobID) { onFinished?(done) }
         }
+        onChange?()
 
         let attemptID = try? store.beginAttempt(jobID: jobID)
         func fail(_ error: Error) -> PostJob {
             let pe = error as? PlatformError
             job.attemptCount += 1
             job.status = .failed
-            job.lastError = error.localizedDescription
+            job.holdReason = nil
+            job.lastError = Redactor.redact(error.localizedDescription)
             job.nextAttemptAt = automaticRetry
                 ? retryPolicy.nextAttempt(afterFailureNumber: job.attemptCount, error: pe)
                 : nil
+            job.checkpoint = (try? store.job(id: jobID))?.checkpoint
             job.updatedAt = Date()
             try? store.upsert(job)
             if let attemptID {
                 try? store.finishAttempt(id: attemptID, succeeded: false, httpStatus: pe?.httpStatus,
                                          message: error.localizedDescription)
             }
+            store.log(.failure, "Attempt \(job.attemptCount) failed: \(error.localizedDescription)",
+                      jobID: jobID, accountID: job.accountID)
+            if pe != nil { recordFailure(accountID: job.accountID, rules: rules, error: pe) }
             return job
         }
 
         do {
-            if job.status == .posted { throw PostingError.alreadyPosted }
             guard let variation = try store.variation(id: job.variationID) else { throw PostingError.notFound }
-            guard let account = try store.accounts().first(where: { $0.id == job.accountID }) else { throw PostingError.notFound }
-            guard account.status == .connected else { throw PostingError.accountNotConnected(account.username) }
+            guard let account else { throw PostingError.notFound }
+            guard account.status == .connected else { throw PostingError.accountNotConnected(account.handle) }
             guard let exportPath = variation.exportPath, !variation.needsExport else { throw PostingError.notExported }
             var fileURL = store.url(forRelative: exportPath)
             guard FileManager.default.fileExists(atPath: fileURL.path) else { throw PostingError.exportMissing }
@@ -189,13 +282,20 @@ public final class PostingService {
             let tokens = try await accounts.validTokens(for: account)
             job.status = .uploading
             job.updatedAt = Date()
+            job.checkpoint = (try? store.job(id: jobID))?.checkpoint
             try store.upsert(job)
             onChange?()
 
             await limiter.recordCall(for: account)
+            let store = self.store
             let request = PublishRequest(videoURL: fileURL, caption: job.caption,
                                          title: job.title.isEmpty ? variation.name : job.title,
-                                         privacy: job.privacy, account: account)
+                                         privacy: job.privacy, account: account, resume: job.checkpoint,
+                                         onCheckpoint: { cp in try? store.saveCheckpoint(cp, jobID: jobID) })
+            if job.checkpoint != nil {
+                store.log(.system, "Resuming: checking \(account.platform.displayName) for the earlier attempt first.",
+                          jobID: jobID, accountID: account.id)
+            }
             let client = accounts.client(for: account.platform)
             let result: PublishResult
             do {
@@ -204,7 +304,9 @@ public final class PostingService {
                 }
             } catch let e as PlatformError {
                 if let ra = e.retryAfter ?? (e.httpStatus == 429 ? 900 : nil) { await limiter.block(account, for: ra) }
-                if e.requiresReauth { try? accounts.mark(account, .error, "Sign-in expired. Reconnect this account.") }
+                if e.requiresReauth {
+                    try? accounts.pauseForSignIn(account, "Sign-in expired. Reconnect this account.")
+                }
                 throw e
             }
 
@@ -213,7 +315,9 @@ public final class PostingService {
             job.remotePostID = result.remotePostID
             job.remoteURL = result.url
             job.lastError = nil
+            job.holdReason = nil
             job.nextAttemptAt = nil
+            job.checkpoint = nil
             job.postedAt = Date()
             job.updatedAt = Date()
             try store.upsert(job)
@@ -221,9 +325,31 @@ public final class PostingService {
                 try? store.finishAttempt(id: attemptID, succeeded: true, httpStatus: 200,
                                          message: "Posted \(result.remotePostID)")
             }
+            store.log(.publish, "Published to \(account.handle) on \(account.platform.displayName).",
+                      jobID: jobID, accountID: account.id)
+            if var a = try? store.account(id: account.id), a.consecutiveFailures != 0 {
+                a.consecutiveFailures = 0
+                try? store.upsert(a)
+            }
             return job
         } catch {
             return fail(error)
+        }
+    }
+
+    /// Failure breaker: after `rules.failureLimit` platform failures in a
+    /// row, the account is paused until the user resumes it.
+    private func recordFailure(accountID: UUID, rules: PublishRules, error: PlatformError?) {
+        guard var a = try? store.account(id: accountID) else { return }
+        a.consecutiveFailures += 1
+        if !a.isPaused, rules.failureLimit > 0, a.consecutiveFailures >= rules.failureLimit {
+            a.isPaused = true
+            a.pauseReason = "\(a.consecutiveFailures) failed attempts in a row. Check the account, then resume it."
+            try? store.upsert(a)
+            store.log(.pause, "Paused \(a.handle) after \(a.consecutiveFailures) failures in a row.", accountID: a.id)
+            onAccountPaused?(a)
+        } else {
+            try? store.upsert(a)
         }
     }
 }

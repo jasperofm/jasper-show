@@ -23,6 +23,10 @@ final class AppState: ObservableObject {
     @Published private(set) var stats: [UUID: PostStats] = [:]
     @Published private(set) var nextScheduledRun: Date?
     @Published private(set) var isSyncingStats = false
+    @Published private(set) var rules = PublishRules()
+    @Published private(set) var isPublisher = false
+    @Published var showActivity = false
+    let background = BackgroundPublisher()
 
     @Published var selectedAssetID: UUID? { didSet { if oldValue != selectedAssetID { selectedVariationID = nil } } }
     @Published var selectedVariationID: UUID? { didSet { if oldValue != selectedVariationID { openEditor() } } }
@@ -73,15 +77,19 @@ final class AppState: ObservableObject {
         importer = MediaImporter(store: store)
         accountService = AccountService(store: store)
         posting = PostingService(store: store, accounts: accountService)
-        scheduler = PostScheduler(store: store, posting: posting)
+        scheduler = PostScheduler(store: store, posting: posting, conditions: SystemConditions(diskURL: store.root))
         analytics = AnalyticsService(store: store, accounts: accountService)
         posting.onChange = { [weak self] in self?.reloadJobs(); self?.reloadAccounts() }
         posting.onProgress = { [weak self] id, stage in self?.uploadProgress[id] = stage }
         posting.onFinished = { [weak self] job in self?.postFinished(job) }
-        scheduler.onStateChange = { [weak self] in self?.nextScheduledRun = self?.scheduler.nextWake }
+        posting.onAccountPaused = { [weak self] a in self?.accountPaused(a) }
+        accountService.onPaused = { [weak self] a in self?.accountPaused(a) }
+        scheduler.onStateChange = { [weak self] in self?.schedulerTicked() }
+        scheduler.onAlert = { [weak self] alert in self?.notify(alert) }
 
-        // A quit mid-upload leaves jobs "uploading"; put them back in the queue.
-        try? store.resetInterruptedJobs()
+        // Interrupted uploads are reset by the scheduler once it holds the
+        // publisher lock, so a running background publisher isn't disturbed.
+        rules = PublishRules.load(from: store)
         reloadAll()
         stats = (try? store.stats()) ?? [:]
         notifier.requestPermission()
@@ -103,6 +111,77 @@ final class AppState: ObservableObject {
     }
 
     func reloadAccounts() { accounts = (try? store.accounts()) ?? [] }
+
+    /// The background publisher may have changed things; refresh what's shown.
+    private func schedulerTicked() {
+        nextScheduledRun = scheduler.nextWake
+        isPublisher = scheduler.isPublisher
+        let fresh = PublishRules.load(from: store)
+        if fresh != rules { rules = fresh }
+        let newJobs = (try? store.jobs()) ?? []
+        if newJobs != jobs { jobs = newJobs }
+        let newAccounts = (try? store.accounts()) ?? []
+        if newAccounts != accounts { accounts = newAccounts }
+    }
+
+    // MARK: Publishing rules and pauses
+
+    func updateRules(_ change: (inout PublishRules) -> Void) {
+        var r = rules
+        change(&r)
+        do {
+            try r.save(to: store)
+            rules = r
+        } catch { report(error) }
+        Task { await scheduler.tick(now: Date()) }
+    }
+
+    /// The global kill switch.
+    func setKillSwitch(_ on: Bool) {
+        updateRules { $0.killSwitch = on }
+        store.log(on ? .pause : .resume, on ? "Kill switch on: all publishing paused." : "Kill switch off: publishing resumed.")
+    }
+
+    func setPaused(_ account: Account, _ paused: Bool) {
+        do { try accountService.setPaused(account, paused) } catch { report(error) }
+        reloadAccounts()
+        if !paused { Task { await scheduler.tick(now: Date()) } }
+    }
+
+    func setPlatformPaused(_ platform: Platform, _ paused: Bool) {
+        updateRules { r in
+            if paused { r.pausedPlatforms.insert(platform) } else { r.pausedPlatforms.remove(platform) }
+        }
+        store.log(paused ? .pause : .resume, "\(platform.displayName) \(paused ? "paused" : "resumed").")
+    }
+
+    private func accountPaused(_ a: Account) {
+        reloadAccounts()
+        notifier.send(title: "Paused \(a.platform.displayName) \(a.handle)", body: a.pauseReason ?? "Publishing to this account is paused.")
+    }
+
+    private func notify(_ alert: PublisherAlert) {
+        switch alert {
+        case .morningDigest(let text): notifier.send(title: "Today in Reel Manager", body: text)
+        case .queueRunningLow(let text): notifier.send(title: "Queue running low", body: text)
+        case .signInExpiring(let text): notifier.send(title: "Sign-in expiring", body: text)
+        }
+    }
+
+    func approve(_ jobs: [PostJob]) {
+        do { try posting.approve(jobs) } catch { report(error) }
+    }
+
+    func unapprove(_ job: PostJob) {
+        do { try posting.unapprove(job) } catch { report(error) }
+    }
+
+    func startOver(_ job: PostJob) {
+        do { try posting.startOver(job) } catch { report(error) }
+    }
+
+    /// Drafts waiting for approval.
+    var drafts: [PostJob] { jobs.filter { $0.status == .pending && !$0.isApproved } }
     func reloadJobs() { jobs = (try? store.jobs()) ?? [] }
 
     func report(_ error: Error, title: String = "Something went wrong") {
@@ -290,9 +369,10 @@ final class AppState: ObservableObject {
         return out
     }
 
-    /// Manual "Post now". Jobs run one after another so per-account rate
-    /// limits and upload bandwidth aren't hammered.
+    /// Manual "Post now". Clicking it is the approval. Jobs run one after
+    /// another so per-account rate limits and upload bandwidth aren't hammered.
     func post(_ jobs: [PostJob]) {
+        approve(jobs)
         Task {
             for j in jobs { await posting.send(jobID: j.id) }
         }
@@ -323,8 +403,10 @@ final class AppState: ObservableObject {
         nextScheduledRun = try? store.nextWakeDate()
     }
 
-    /// Schedules jobs one after another: the first at `start`, then every `interval` seconds.
+    /// Approves and schedules jobs one after another: the first at `start`,
+    /// then every `interval` seconds.
     func schedule(_ jobs: [PostJob], start: Date, interval: TimeInterval) {
+        approve(jobs)
         let dates = StaggerPlanner.dates(count: jobs.count, start: start, interval: interval)
         do { try posting.schedule(jobs, at: dates) } catch { report(error) }
         nextScheduledRun = try? store.nextWakeDate()
@@ -336,10 +418,11 @@ final class AppState: ObservableObject {
         nextScheduledRun = try? store.nextWakeDate()
     }
 
-    /// Pending jobs whose variation is exported, oldest first: the queue for "Schedule All".
+    /// Approved, unscheduled jobs whose variation is exported, oldest first:
+    /// the queue for "Schedule All". Drafts must be approved first.
     var schedulableJobs: [PostJob] {
         jobs.filter { j in
-            j.status == .pending && !(variation(id: j.variationID)?.needsExport ?? true)
+            j.status == .pending && j.isApproved && !(variation(id: j.variationID)?.needsExport ?? true)
         }
         .sorted { $0.createdAt < $1.createdAt }
     }

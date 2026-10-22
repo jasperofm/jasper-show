@@ -25,12 +25,21 @@ struct AccountDetailView: View {
                         Button("Log In Again") { app.connect(account.platform, reconnecting: account) }
                             .buttonStyle(BrandButtonStyle())
                     }
+                    Button(account.isPaused ? "Resume" : "Pause") { app.setPaused(account, !account.isPaused) }
+                        .help(account.isPaused ? "Let scheduled posts go out to this account again" : "Hold every post to this account until you resume it")
                     Menu {
                         Button("Check Connection") { Task { await app.accountService.sync(account); app.reloadAccounts() } }
                         Button("Log Out") { app.disconnect(account, remove: false) }
                         Button("Remove Account", role: .destructive) { app.disconnect(account, remove: true) }
                     } label: { Image(systemName: "ellipsis.circle") }
                         .menuStyle(.borderlessButton).fixedSize()
+                }
+
+                if account.isPaused {
+                    Label("Paused. \(account.pauseReason ?? "") Scheduled posts for this account are held until you resume it.",
+                          systemImage: "pause.circle.fill")
+                        .foregroundStyle(.orange)
+                        .card()
                 }
 
                 let jobs = app.jobs(for: account)

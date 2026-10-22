@@ -24,10 +24,31 @@ public struct PublishRequest: Sendable {
     public var title: String
     public var privacy: PostPrivacy
     public var account: Account
+    /// Where an earlier attempt got to. Clients check the platform's state
+    /// for it before doing anything again, so a retry never posts twice.
+    public var resume: PublishCheckpoint?
+    /// Clients call this before moving to the next step; the caller saves it.
+    public var onCheckpoint: @Sendable (PublishCheckpoint) async -> Void
 
-    public init(videoURL: URL, caption: String, title: String, privacy: PostPrivacy, account: Account) {
+    public init(videoURL: URL, caption: String, title: String, privacy: PostPrivacy, account: Account,
+                resume: PublishCheckpoint? = nil,
+                onCheckpoint: @escaping @Sendable (PublishCheckpoint) async -> Void = { _ in }) {
         self.videoURL = videoURL; self.caption = caption; self.title = title
         self.privacy = privacy; self.account = account
+        self.resume = resume; self.onCheckpoint = onCheckpoint
+    }
+
+    func checkpoint(_ step: PublishCheckpoint.Step, _ id: String) async {
+        await onCheckpoint(PublishCheckpoint(step: step, remoteID: id))
+    }
+}
+
+extension PlatformError {
+    /// The platform couldn't tell us whether an earlier attempt went out.
+    /// Not retried automatically; the user checks and chooses "Start over".
+    static func unconfirmed(_ p: Platform, _ detail: String) -> PlatformError {
+        PlatformError(platform: p, httpStatus: 409,
+                      message: "Couldn't confirm whether the earlier attempt was published (\(detail)). Check the account, then use Start Over if it isn't there.")
     }
 }
 

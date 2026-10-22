@@ -103,14 +103,27 @@ public struct Account: Identifiable, Hashable, Sendable {
     public var statusMessage: String?
     public var lastSyncAt: Date?
     public var createdAt: Date
+    /// Paused accounts are skipped by the publisher until resumed.
+    public var isPaused: Bool
+    public var pauseReason: String?
+    /// Failures in a row; reset by a success. Drives the auto-pause breaker.
+    public var consecutiveFailures: Int
+    /// When the stored sign-in expires, if the platform says.
+    public var tokenExpiresAt: Date?
 
     public init(id: UUID = UUID(), platform: Platform, username: String, remoteID: String? = nil,
                 status: AccountStatus = .pending, statusMessage: String? = nil,
-                lastSyncAt: Date? = nil, createdAt: Date = Date()) {
+                lastSyncAt: Date? = nil, createdAt: Date = Date(), isPaused: Bool = false,
+                pauseReason: String? = nil, consecutiveFailures: Int = 0, tokenExpiresAt: Date? = nil) {
         self.id = id; self.platform = platform; self.username = username; self.remoteID = remoteID
         self.status = status; self.statusMessage = statusMessage
         self.lastSyncAt = lastSyncAt; self.createdAt = createdAt
+        self.isPaused = isPaused; self.pauseReason = pauseReason
+        self.consecutiveFailures = consecutiveFailures; self.tokenExpiresAt = tokenExpiresAt
     }
+
+    /// Connected and not paused.
+    public var canPublish: Bool { status == .connected && !isPaused }
 
     public var keychainKey: String { "account.\(id.uuidString)" }
 
@@ -120,17 +133,23 @@ public struct Account: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Post lifecycle. A pending job is a *draft* until `PostJob.approvedAt` is
+/// set; only approved jobs can be scheduled or published.
+///
+///   pending (draft → approved) → scheduled → uploading → processing → posted
+///                               ↘ held (rules/pauses) ↗     ↘ failed → (retry) ↗
 public enum PostStatus: String, Codable, CaseIterable, Sendable {
-    /// Assigned but not yet sent. Phase 2: has a `scheduledAt` the scheduler waits for.
     case pending
     case scheduled
+    /// Publishing: sending the file.
     case uploading
-    /// Upload accepted, platform still processing.
+    /// Publishing: platform accepted it and is processing.
     case processing
     case posted
-    /// Last attempt failed; may be retried automatically (Phase 2) or manually.
     case failed
     case cancelled
+    /// Due, but a rule, pause or system condition is holding it back.
+    case held
 
     public var isTerminal: Bool { self == .posted || self == .cancelled }
     public var isActive: Bool { self == .uploading || self == .processing }
@@ -159,6 +178,14 @@ public struct PostJob: Identifiable, Hashable, Sendable {
     public var lastError: String?
     /// Groups jobs created together (Phase 2 batch / staggered queue).
     public var batchID: UUID?
+    /// Set when the user approves the post. Nil = draft. Nothing is
+    /// scheduled or published without it.
+    public var approvedAt: Date?
+    /// Publish progress saved after each step, so a restart resumes
+    /// instead of posting twice.
+    public var checkpoint: PublishCheckpoint?
+    /// Why the post is held, when status is `.held`.
+    public var holdReason: String?
     public var createdAt: Date
     public var updatedAt: Date
     public var postedAt: Date?
@@ -167,14 +194,74 @@ public struct PostJob: Identifiable, Hashable, Sendable {
                 title: String = "", privacy: PostPrivacy = .publicAudience, overlay: TextOverlay? = nil,
                 status: PostStatus = .pending, scheduledAt: Date? = nil, nextAttemptAt: Date? = nil,
                 attemptCount: Int = 0, remotePostID: String? = nil, remoteURL: String? = nil,
-                lastError: String? = nil, batchID: UUID? = nil, createdAt: Date = Date(),
+                lastError: String? = nil, batchID: UUID? = nil, approvedAt: Date? = nil,
+                checkpoint: PublishCheckpoint? = nil, holdReason: String? = nil, createdAt: Date = Date(),
                 updatedAt: Date = Date(), postedAt: Date? = nil) {
         self.id = id; self.variationID = variationID; self.accountID = accountID
         self.caption = caption; self.title = title; self.privacy = privacy; self.overlay = overlay; self.status = status; self.scheduledAt = scheduledAt
         self.nextAttemptAt = nextAttemptAt; self.attemptCount = attemptCount
         self.remotePostID = remotePostID; self.remoteURL = remoteURL; self.lastError = lastError
-        self.batchID = batchID; self.createdAt = createdAt; self.updatedAt = updatedAt; self.postedAt = postedAt
+        self.batchID = batchID; self.approvedAt = approvedAt; self.checkpoint = checkpoint
+        self.holdReason = holdReason; self.createdAt = createdAt; self.updatedAt = updatedAt; self.postedAt = postedAt
     }
+}
+
+extension PostJob {
+    public var isApproved: Bool { approvedAt != nil }
+
+    /// The state names from the product spec, for display.
+    public var stateLabel: String {
+        switch status {
+        case .pending: return isApproved ? "Approved" : "Draft"
+        case .scheduled: return "Scheduled"
+        case .uploading, .processing: return "Publishing"
+        case .posted: return "Published"
+        case .failed: return "Failed"
+        case .cancelled: return "Cancelled"
+        case .held: return "Held"
+        }
+    }
+}
+
+/// Where a publish got to. Saved before each next step.
+public struct PublishCheckpoint: Codable, Hashable, Sendable {
+    public enum Step: String, Codable, Sendable {
+        /// Platform-side container/upload session exists (id in `remoteID`).
+        case created
+        /// File fully uploaded.
+        case uploaded
+        /// Publish call sent; waiting for the platform to confirm.
+        case publishRequested
+
+        public var label: String {
+            switch self {
+            case .created: return "upload started"
+            case .uploaded: return "uploaded"
+            case .publishRequested: return "publish requested"
+            }
+        }
+    }
+    public var step: Step
+    /// Container / publish / video id the platform gave us.
+    public var remoteID: String
+    public var savedAt: Date
+
+    public init(step: Step, remoteID: String, savedAt: Date = Date()) {
+        self.step = step; self.remoteID = remoteID; self.savedAt = savedAt
+    }
+}
+
+/// Audit log entry.
+public struct AppEvent: Identifiable, Hashable, Sendable {
+    public enum Kind: String, Sendable {
+        case publish, failure, pause, resume, hold, approval, schedule, auth, system
+    }
+    public var id: Int64
+    public var at: Date
+    public var kind: Kind
+    public var message: String
+    public var jobID: UUID?
+    public var accountID: UUID?
 }
 
 /// Latest engagement numbers for a posted job, read from the platform's API.

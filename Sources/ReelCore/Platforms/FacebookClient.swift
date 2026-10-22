@@ -78,49 +78,86 @@ public struct FacebookClient: PlatformClient {
                         progress: @escaping @Sendable (PublishStage) -> Void) async throws -> PublishResult {
         guard let pageID = req.account.remoteID else { throw PlatformError(platform: platform, message: "Account has no Page id") }
         let token = tokens.accessToken
-
-        // 1. Start an upload session.
-        let startURL = graph.appendingPathComponent("\(pageID)/video_reels")
-            .with(query: ["upload_phase": "start", "access_token": token])
-        let start = try await http.json(.make(startURL, method: "POST"))
-        guard let videoID = start.string("video_id") else {
-            throw PlatformError(platform: platform, message: "Could not start the upload")
-        }
-        let fallback = "https://rupload.facebook.com/video-upload/\(Self.graphVersion)/\(videoID)"
-        guard let uploadURL = URL(string: start.string("upload_url") ?? fallback) else {
-            throw PlatformError(platform: platform, message: "Invalid upload address")
+        let statusURL: (String) -> URL = { id in
+            graph.appendingPathComponent(id).with(query: ["fields": "status", "access_token": token])
         }
 
-        // 2. Upload the file.
-        let size = try FileManager.default.attributesOfItem(atPath: req.videoURL.path)[.size] as? Int ?? 0
-        var up = URLRequest(url: uploadURL)
-        up.httpMethod = "POST"
-        up.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization")
-        up.setValue("0", forHTTPHeaderField: "offset")
-        up.setValue(String(size), forHTTPHeaderField: "file_size")
-        progress(.uploading(0))
-        _ = try await http.upload(up, fromFile: req.videoURL)
-        progress(.uploading(1))
+        // Resuming: a Reel is only published by the "finish" call. An upload
+        // that never reached it is abandoned; one that did is checked, never re-sent.
+        var videoID: String?
+        var needsFinish = true
+        if let cp = req.resume {
+            switch cp.step {
+            case .created:
+                break
+            case .uploaded:
+                videoID = cp.remoteID
+            case .publishRequested:
+                let s: [String: Any]
+                do {
+                    s = try await http.json(.make(statusURL(cp.remoteID))).dict("status") ?? [:]
+                } catch let e as PlatformError where e.isRetryable {
+                    throw e
+                } catch {
+                    throw PlatformError.unconfirmed(platform, "the video can't be read")
+                }
+                if s.string("video_status") != "error" {
+                    videoID = cp.remoteID
+                    needsFinish = false
+                }
+            }
+        }
 
-        // 3. Publish.
-        let finishURL = graph.appendingPathComponent("\(pageID)/video_reels").with(query: [
-            "upload_phase": "finish", "video_id": videoID, "video_state": "PUBLISHED",
-            "description": req.caption, "access_token": token,
-        ])
-        _ = try await http.json(.make(finishURL, method: "POST"))
+        if videoID == nil {
+            // 1. Start an upload session.
+            let startURL = graph.appendingPathComponent("\(pageID)/video_reels")
+                .with(query: ["upload_phase": "start", "access_token": token])
+            let start = try await http.json(.make(startURL, method: "POST"))
+            guard let id = start.string("video_id") else {
+                throw PlatformError(platform: platform, message: "Could not start the upload")
+            }
+            await req.checkpoint(.created, id)
+            let fallback = "https://rupload.facebook.com/video-upload/\(Self.graphVersion)/\(id)"
+            guard let uploadURL = URL(string: start.string("upload_url") ?? fallback) else {
+                throw PlatformError(platform: platform, message: "Invalid upload address")
+            }
+
+            // 2. Upload the file.
+            let size = try FileManager.default.attributesOfItem(atPath: req.videoURL.path)[.size] as? Int ?? 0
+            var up = URLRequest(url: uploadURL)
+            up.httpMethod = "POST"
+            up.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization")
+            up.setValue("0", forHTTPHeaderField: "offset")
+            up.setValue(String(size), forHTTPHeaderField: "file_size")
+            progress(.uploading(0))
+            _ = try await http.upload(up, fromFile: req.videoURL)
+            progress(.uploading(1))
+            await req.checkpoint(.uploaded, id)
+            videoID = id
+        }
+        guard let reelID = videoID else { throw PlatformError(platform: platform, message: "No upload session") }
+
+        // 3. Publish. Saved first, so a crash here is checked on the next try.
+        if needsFinish {
+            await req.checkpoint(.publishRequested, reelID)
+            let finishURL = graph.appendingPathComponent("\(pageID)/video_reels").with(query: [
+                "upload_phase": "finish", "video_id": reelID, "video_state": "PUBLISHED",
+                "description": req.caption, "access_token": token,
+            ])
+            _ = try await http.json(.make(finishURL, method: "POST"))
+        }
 
         // 4. Wait for processing.
         progress(.processing)
-        let statusURL = graph.appendingPathComponent(videoID).with(query: ["fields": "status", "access_token": token])
         for _ in 0..<60 {
             try await pollDelay(5)
-            let s = try await http.json(.make(statusURL)).dict("status") ?? [:]
+            let s = try await http.json(.make(statusURL(reelID))).dict("status") ?? [:]
             if s.string("video_status") == "error" {
                 let msg = s.dict("processing_phase")?.dict("error")?.string("message") ?? "Processing failed"
                 throw PlatformError(platform: platform, httpStatus: 400, message: msg)
             }
             if s.string("video_status") == "ready" || s.dict("publishing_phase")?.string("status") == "complete" {
-                return PublishResult(remotePostID: videoID, url: "https://www.facebook.com/reel/\(videoID)")
+                return PublishResult(remotePostID: reelID, url: "https://www.facebook.com/reel/\(reelID)")
             }
         }
         throw PlatformError(platform: platform, message: "Still processing after 5 minutes; check the Page.")

@@ -4,8 +4,12 @@ import ReelCore
 /// Developer app credentials per platform. You register your own app with
 /// each platform and paste its client ID / secret / redirect URI here.
 struct SettingsView: View {
+    @EnvironmentObject var app: AppState
+
     var body: some View {
         TabView {
+            PublishingSettings(background: app.background)
+                .tabItem { Label("Publishing", systemImage: "paperplane") }
             ForEach(Platform.allCases) { p in
                 PlatformConfigForm(platform: p)
                     .tabItem { Label(p.displayName, systemImage: p.symbolName) }
@@ -13,7 +17,7 @@ struct SettingsView: View {
             StorageSettings()
                 .tabItem { Label("Storage", systemImage: "internaldrive") }
         }
-        .frame(width: 540, height: 320)
+        .frame(width: 560, height: 520)
     }
 }
 

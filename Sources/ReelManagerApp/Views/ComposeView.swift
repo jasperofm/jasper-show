@@ -190,7 +190,13 @@ struct ComposeView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
-                Text("Keep Reel Manager open for scheduled posts.").font(.caption).foregroundStyle(.secondary)
+                Text(app.background.status == .on
+                     ? "The background publisher sends scheduled posts even when Reel Manager is closed."
+                     : "Keep Reel Manager open (or in the menu bar) for scheduled posts, or turn on the background publisher in Settings › Publishing.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                if timing != .now && scheduleDates.contains(where: { PublishGate.isInLikelySleepWindow($0) }) {
+                    SleepWarning()
+                }
             }
 
             if !warnings.isEmpty {
@@ -237,6 +243,11 @@ struct ComposeView: View {
         .card(padding: 10)
     }
 
+    private var scheduleDates: [Date] {
+        StaggerPlanner.dates(count: max(1, targets.count), start: startDate,
+                             interval: timing == .stagger ? intervalMinutes * 60 : 0)
+    }
+
     private var lastStaggerDate: Date {
         startDate.addingTimeInterval(Double(max(0, targets.count - 1)) * intervalMinutes * 60)
     }
@@ -262,9 +273,9 @@ struct ComposeView: View {
             if privacy == nil && !targets.isEmpty {
                 Text("Choose who can see it").font(.caption).foregroundStyle(.secondary)
             }
-            Button("Add to Queue") { submit(queueOnly: true) }
+            Button("Save as Draft") { submit(queueOnly: true) }
                 .disabled(!canSubmit)
-                .help("Saves the posts as pending; schedule them later from the Schedule page")
+                .help("Saves the posts as drafts. Approve and schedule them later from the Schedule page.")
             Button(actionTitle) { submit(queueOnly: false) }
                 .buttonStyle(BrandButtonStyle())
                 .keyboardShortcut(.defaultAction)
@@ -277,8 +288,8 @@ struct ComposeView: View {
     private var actionTitle: String {
         let n = targets.count
         switch timing {
-        case .now: return "Post to \(n) account\(n == 1 ? "" : "s")"
-        case .once, .stagger: return "Schedule \(n) post\(n == 1 ? "" : "s")"
+        case .now: return "Approve & Post to \(n) account\(n == 1 ? "" : "s")"
+        case .once, .stagger: return "Approve & Schedule \(n) post\(n == 1 ? "" : "s")"
         }
     }
 

@@ -106,14 +106,16 @@ struct AccountRow: View {
                 .overlay(alignment: .bottomTrailing) { StatusDot(status: account.status).offset(x: 2, y: 2) }
             VStack(alignment: .leading, spacing: 1) {
                 Text(account.handle).lineLimit(1)
-                Text(subtitle).font(.caption).foregroundStyle(account.status == .error ? .red : .secondary).lineLimit(1)
+                Text(subtitle).font(.caption)
+                    .foregroundStyle(account.status == .error ? .red : account.isPaused ? .orange : .secondary).lineLimit(1)
             }
         }
         .padding(.vertical, 2)
-        .help(account.statusMessage ?? account.status.rawValue.capitalized)
+        .help(account.pauseReason ?? account.statusMessage ?? account.status.rawValue.capitalized)
     }
 
     private var subtitle: String {
+        if account.isPaused { return "Paused" }
         switch account.status {
         case .error: return account.statusMessage ?? "Needs attention"
         case .disconnected: return "Logged out"

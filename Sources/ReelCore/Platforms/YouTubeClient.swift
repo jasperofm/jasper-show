@@ -73,6 +73,27 @@ public struct YouTubeClient: PlatformClient {
     public func publish(_ req: PublishRequest, tokens: OAuthTokens,
                         progress: @escaping @Sendable (PublishStage) -> Void) async throws -> PublishResult {
         let size = try FileManager.default.attributesOfItem(atPath: req.videoURL.path)[.size] as? Int ?? 0
+
+        // Resuming: ask the upload session how far it got. A finished
+        // session means the video already exists; never start a second one.
+        if let cp = req.resume, let session = URL(string: cp.remoteID) {
+            var probe = URLRequest(url: session)
+            probe.httpMethod = "PUT"
+            probe.setValue("Bearer \(tokens.accessToken)", forHTTPHeaderField: "Authorization")
+            probe.setValue("bytes */\(size)", forHTTPHeaderField: "Content-Range")
+            do {
+                let (data, resp) = try await http.upload(probe, data: Data())
+                if resp.statusCode == 308 {
+                    let received = resp.value(forHTTPHeaderField: "Range")
+                        .flatMap { $0.split(separator: "-").last }.flatMap { Int($0) }.map { $0 + 1 } ?? 0
+                    return try await upload(req, to: session, from: received, size: size, tokens: tokens, progress: progress)
+                }
+                return try video(from: data)
+            } catch let e as PlatformError where e.httpStatus == 404 || e.httpStatus == 410 {
+                // Session expired before the upload finished: nothing was published.
+            }
+        }
+
         let privacy: String
         switch req.privacy {
         case .publicAudience: privacy = "public"
@@ -92,15 +113,33 @@ public struct YouTubeClient: PlatformClient {
         guard let loc = initResp.value(forHTTPHeaderField: "Location"), let uploadURL = URL(string: loc) else {
             throw PlatformError(platform: platform, message: "Upload session was not created")
         }
+        await req.checkpoint(.created, uploadURL.absoluteString)
+        return try await upload(req, to: uploadURL, from: 0, size: size, tokens: tokens, progress: progress)
+    }
 
-        progress(.uploading(0))
-        var put = URLRequest(url: uploadURL)
+    private func upload(_ req: PublishRequest, to session: URL, from offset: Int, size: Int, tokens: OAuthTokens,
+                        progress: @escaping @Sendable (PublishStage) -> Void) async throws -> PublishResult {
+        progress(.uploading(size > 0 ? Double(offset) / Double(size) : 0))
+        var put = URLRequest(url: session)
         put.httpMethod = "PUT"
         put.setValue("Bearer \(tokens.accessToken)", forHTTPHeaderField: "Authorization")
         put.setValue("video/mp4", forHTTPHeaderField: "Content-Type")
-        let (data, _) = try await http.upload(put, fromFile: req.videoURL)
+        let data: Data
+        if offset == 0 {
+            (data, _) = try await http.upload(put, fromFile: req.videoURL)
+        } else {
+            let handle = try FileHandle(forReadingFrom: req.videoURL)
+            defer { try? handle.close() }
+            try handle.seek(toOffset: UInt64(offset))
+            let rest = handle.readDataToEndOfFile()
+            put.setValue("bytes \(offset)-\(size - 1)/\(size)", forHTTPHeaderField: "Content-Range")
+            (data, _) = try await http.upload(put, data: rest)
+        }
         progress(.uploading(1))
+        return try video(from: data)
+    }
 
+    private func video(from data: Data) throws -> PublishResult {
         let j = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         guard let id = j.string("id") else { throw PlatformError(platform: platform, message: "Upload finished without a video id") }
         return PublishResult(remotePostID: id, url: "https://www.youtube.com/shorts/\(id)")

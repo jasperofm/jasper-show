@@ -100,6 +100,27 @@ enum Schema {
         );
         ALTER TABLE post_jobs ADD COLUMN overlay_json TEXT;
         """,
+        // 3: Approval gate, resumable publishing, account pauses, settings, audit log.
+        """
+        ALTER TABLE post_jobs ADD COLUMN approved_at REAL;
+        ALTER TABLE post_jobs ADD COLUMN checkpoint_json TEXT;
+        ALTER TABLE post_jobs ADD COLUMN hold_reason TEXT;
+        UPDATE post_jobs SET approved_at = updated_at WHERE status <> 'pending';
+        ALTER TABLE accounts ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE accounts ADD COLUMN pause_reason TEXT;
+        ALTER TABLE accounts ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE accounts ADD COLUMN token_expires_at REAL;
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            at REAL NOT NULL,
+            kind TEXT NOT NULL,
+            message TEXT NOT NULL,
+            job_id TEXT,
+            account_id TEXT
+        );
+        CREATE INDEX idx_events_at ON events(at);
+        """,
     ]
 
     static func migrate(_ db: SQLiteDatabase) throws {

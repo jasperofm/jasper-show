@@ -180,23 +180,34 @@ public final class LibraryStore: @unchecked Sendable {
 
     public func upsert(_ a: Account) throws {
         try db.run("""
-            INSERT INTO accounts (id, platform, username, remote_id, status, status_message, last_sync_at, created_at)
-            VALUES (?,?,?,?,?,?,?,?)
+            INSERT INTO accounts (id, platform, username, remote_id, status, status_message, last_sync_at, created_at,
+                paused, pause_reason, consecutive_failures, token_expires_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET username = excluded.username, remote_id = excluded.remote_id,
                 status = excluded.status, status_message = excluded.status_message,
-                last_sync_at = excluded.last_sync_at
+                last_sync_at = excluded.last_sync_at, paused = excluded.paused,
+                pause_reason = excluded.pause_reason, consecutive_failures = excluded.consecutive_failures,
+                token_expires_at = excluded.token_expires_at
             """, [a.id, a.platform.rawValue, a.username, a.remoteID, a.status.rawValue, a.statusMessage,
-                  a.lastSyncAt, a.createdAt])
+                  a.lastSyncAt, a.createdAt, a.isPaused, a.pauseReason, a.consecutiveFailures, a.tokenExpiresAt])
     }
 
     public func accounts() throws -> [Account] {
-        try db.query("SELECT * FROM accounts ORDER BY platform, username") { r in
-            Account(id: r.uuid("id"), platform: Platform(rawValue: r.string("platform")) ?? .instagram,
-                    username: r.string("username"), remoteID: r.optString("remote_id"),
-                    status: AccountStatus(rawValue: r.string("status")) ?? .error,
-                    statusMessage: r.optString("status_message"), lastSyncAt: r.optDate("last_sync_at"),
-                    createdAt: r.date("created_at"))
-        }
+        try db.query("SELECT * FROM accounts ORDER BY platform, username", map: mapAccount)
+    }
+
+    public func account(id: UUID) throws -> Account? {
+        try db.query("SELECT * FROM accounts WHERE id = ?", [id], map: mapAccount).first
+    }
+
+    private func mapAccount(_ r: Row) -> Account {
+        Account(id: r.uuid("id"), platform: Platform(rawValue: r.string("platform")) ?? .instagram,
+                username: r.string("username"), remoteID: r.optString("remote_id"),
+                status: AccountStatus(rawValue: r.string("status")) ?? .error,
+                statusMessage: r.optString("status_message"), lastSyncAt: r.optDate("last_sync_at"),
+                createdAt: r.date("created_at"), isPaused: r.bool("paused"),
+                pauseReason: r.optString("pause_reason"), consecutiveFailures: r.int("consecutive_failures"),
+                tokenExpiresAt: r.optDate("token_expires_at"))
     }
 
     public func deleteAccount(_ a: Account) throws {
@@ -209,17 +220,20 @@ public final class LibraryStore: @unchecked Sendable {
         try db.run("""
             INSERT INTO post_jobs (id, variation_id, account_id, caption, title, privacy, status, scheduled_at,
                 next_attempt_at, attempt_count, remote_post_id, remote_url, last_error, batch_id, created_at,
-                updated_at, posted_at, overlay_json)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                updated_at, posted_at, overlay_json, approved_at, checkpoint_json, hold_reason)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET caption = excluded.caption, title = excluded.title,
                 privacy = excluded.privacy, status = excluded.status, overlay_json = excluded.overlay_json,
                 scheduled_at = excluded.scheduled_at, next_attempt_at = excluded.next_attempt_at,
                 attempt_count = excluded.attempt_count, remote_post_id = excluded.remote_post_id,
                 remote_url = excluded.remote_url, last_error = excluded.last_error,
-                batch_id = excluded.batch_id, updated_at = excluded.updated_at, posted_at = excluded.posted_at
+                batch_id = excluded.batch_id, updated_at = excluded.updated_at, posted_at = excluded.posted_at,
+                approved_at = excluded.approved_at, checkpoint_json = excluded.checkpoint_json,
+                hold_reason = excluded.hold_reason
             """, [j.id, j.variationID, j.accountID, j.caption, j.title, j.privacy.rawValue, j.status.rawValue, j.scheduledAt, j.nextAttemptAt,
                   j.attemptCount, j.remotePostID, j.remoteURL, j.lastError, j.batchID, j.createdAt,
-                  j.updatedAt, j.postedAt, j.overlay.flatMap { try? json($0) }])
+                  j.updatedAt, j.postedAt, j.overlay.flatMap { try? json($0) }, j.approvedAt,
+                  j.checkpoint.flatMap { try? json($0) }, j.holdReason])
     }
 
     public func jobs() throws -> [PostJob] {
@@ -230,15 +244,50 @@ public final class LibraryStore: @unchecked Sendable {
         try db.query("SELECT * FROM post_jobs WHERE id = ?", [id], map: mapJob).first
     }
 
-    /// Jobs that are ready to run at `now`. Used by Phase 2's scheduler; Phase 1
-    /// never sets scheduled_at/next_attempt_at so only manual sends happen.
+    /// Approved jobs that are ready to run at `now`: scheduled or held posts
+    /// whose time has come, and failed posts whose retry time has passed.
+    /// Drafts are never returned.
     public func dueJobs(now: Date = Date()) throws -> [PostJob] {
         try db.query("""
             SELECT * FROM post_jobs
-            WHERE (status = 'scheduled' AND scheduled_at <= ?)
-               OR (status = 'failed' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?)
+            WHERE approved_at IS NOT NULL AND (
+                (status IN ('scheduled', 'held') AND COALESCE(next_attempt_at, scheduled_at) <= ?)
+                OR (status = 'failed' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?))
             ORDER BY COALESCE(next_attempt_at, scheduled_at)
             """, [now, now], map: mapJob)
+    }
+
+    /// Posts that went out (or are going out) for an account since `since`.
+    /// Used for daily caps.
+    public func postedCount(accountID: UUID? = nil, since: Date) throws -> Int {
+        if let accountID {
+            return try db.query("SELECT COUNT(*) AS n FROM post_jobs WHERE account_id = ? AND posted_at >= ?",
+                                [accountID, since]) { $0.int("n") }.first ?? 0
+        }
+        return try db.query("SELECT COUNT(*) AS n FROM post_jobs WHERE posted_at >= ?", [since]) { $0.int("n") }.first ?? 0
+    }
+
+    /// When the account last published, for the minimum gap between posts.
+    public func lastPostedAt(accountID: UUID? = nil) throws -> Date? {
+        if let accountID {
+            return try db.query("SELECT MAX(posted_at) AS t FROM post_jobs WHERE account_id = ?", [accountID]) { $0.optDate("t") }.first ?? nil
+        }
+        return try db.query("SELECT MAX(posted_at) AS t FROM post_jobs") { $0.optDate("t") }.first ?? nil
+    }
+
+    /// Atomically marks a job as publishing. Returns false if another send
+    /// (in this process or the background publisher) already has it, or it
+    /// is already posted or cancelled. This is the double-post guard.
+    public func claim(jobID: UUID, now: Date = Date()) throws -> Bool {
+        try db.run("""
+            UPDATE post_jobs SET status = 'uploading', updated_at = ?
+            WHERE id = ? AND approved_at IS NOT NULL AND status NOT IN ('uploading', 'processing', 'posted', 'cancelled')
+            """, [now, jobID]) == 1
+    }
+
+    /// Saves only the checkpoint column, so it can be written mid-upload.
+    public func saveCheckpoint(_ cp: PublishCheckpoint?, jobID: UUID) throws {
+        try db.run("UPDATE post_jobs SET checkpoint_json = ?, updated_at = ? WHERE id = ?", [cp.flatMap { try? json($0) }, Date(), jobID])
     }
 
     public func deleteJob(_ j: PostJob) throws {
@@ -254,23 +303,31 @@ public final class LibraryStore: @unchecked Sendable {
                 scheduledAt: r.optDate("scheduled_at"), nextAttemptAt: r.optDate("next_attempt_at"),
                 attemptCount: r.int("attempt_count"), remotePostID: r.optString("remote_post_id"),
                 remoteURL: r.optString("remote_url"), lastError: r.optString("last_error"),
-                batchID: r.optUUID("batch_id"), createdAt: r.date("created_at"),
-                updatedAt: r.date("updated_at"), postedAt: r.optDate("posted_at"))
+                batchID: r.optUUID("batch_id"),
+                approvedAt: r.optDate("approved_at"),
+                checkpoint: r.optString("checkpoint_json").flatMap { try? decoder.decode(PublishCheckpoint.self, from: Data($0.utf8)) },
+                holdReason: r.optString("hold_reason"),
+                createdAt: r.date("created_at"), updatedAt: r.date("updated_at"), postedAt: r.optDate("posted_at"))
     }
 
-    /// Jobs left mid-upload by a quit or crash go back to failed so they can be retried.
-    public func resetInterruptedJobs(now: Date = Date()) throws {
+    /// Jobs left mid-upload by a quit or crash go back to failed so they can
+    /// be retried. Their checkpoint is kept, so the retry first asks the
+    /// platform whether the post already went out. Only jobs untouched for
+    /// `staleAfter` are reset, so a send still running in the other process
+    /// isn't disturbed.
+    public func resetInterruptedJobs(now: Date = Date(), staleAfter: TimeInterval = 0) throws {
         try db.run("""
             UPDATE post_jobs SET status = 'failed', last_error = 'Interrupted (the app was closed during upload).',
-                next_attempt_at = ?, updated_at = ? WHERE status IN ('uploading', 'processing')
-            """, [now, now])
+                next_attempt_at = ?, updated_at = ? WHERE status IN ('uploading', 'processing') AND updated_at <= ?
+            """, [now, now, now.addingTimeInterval(-staleAfter)])
     }
 
     /// Next time the scheduler has something to do, if anything.
     public func nextWakeDate() throws -> Date? {
         try db.query("""
             SELECT MIN(t) AS t FROM (
-                SELECT scheduled_at AS t FROM post_jobs WHERE status = 'scheduled'
+                SELECT COALESCE(next_attempt_at, scheduled_at) AS t FROM post_jobs
+                    WHERE status IN ('scheduled', 'held') AND approved_at IS NOT NULL
                 UNION ALL
                 SELECT next_attempt_at AS t FROM post_jobs WHERE status = 'failed' AND next_attempt_at IS NOT NULL)
             """) { $0.optDate("t") }.first ?? nil
@@ -306,7 +363,7 @@ public final class LibraryStore: @unchecked Sendable {
 
     public func finishAttempt(id: Int64, succeeded: Bool, httpStatus: Int?, message: String, at date: Date = Date()) throws {
         try db.run("UPDATE post_attempts SET finished_at = ?, succeeded = ?, http_status = ?, message = ? WHERE id = ?",
-                   [date, succeeded, httpStatus, message, id])
+                   [date, succeeded, httpStatus, Redactor.redact(message), id])
     }
 
     public func attempts(for jobID: UUID) throws -> [PostAttempt] {
@@ -315,6 +372,51 @@ public final class LibraryStore: @unchecked Sendable {
                         finishedAt: r.optDate("finished_at"), succeeded: r.bool("succeeded"),
                         httpStatus: r.optInt("http_status"), message: r.string("message"))
         }
+    }
+
+    // MARK: Settings
+
+    public func setting(_ key: String) throws -> String? {
+        try db.query("SELECT value FROM settings WHERE key = ?", [key]) { $0.string("value") }.first
+    }
+
+    public func setSetting(_ key: String, _ value: String?) throws {
+        if let value {
+            try db.run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                       [key, value])
+        } else {
+            try db.run("DELETE FROM settings WHERE key = ?", [key])
+        }
+    }
+
+    public func setting<T: Decodable>(_ key: String, as type: T.Type) -> T? {
+        guard let s = try? setting(key) else { return nil }
+        return try? decoder.decode(T.self, from: Data(s.utf8))
+    }
+
+    public func setSetting<T: Encodable>(_ key: String, encoding value: T) throws {
+        try setSetting(key, try json(value))
+    }
+
+    // MARK: Event log
+
+    public func log(_ kind: AppEvent.Kind, _ message: String, jobID: UUID? = nil, accountID: UUID? = nil,
+                    at date: Date = Date()) {
+        _ = try? db.insert("INSERT INTO events (at, kind, message, job_id, account_id) VALUES (?,?,?,?,?)",
+                           [date, kind.rawValue, Redactor.redact(message), jobID, accountID])
+    }
+
+    public func events(limit: Int = 500, since: Date? = nil) throws -> [AppEvent] {
+        try db.query("SELECT * FROM events WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?",
+                     [since ?? Date.distantPast, limit]) { r in
+            AppEvent(id: r.int64("id"), at: r.date("at"), kind: AppEvent.Kind(rawValue: r.string("kind")) ?? .system,
+                     message: r.string("message"), jobID: r.optUUID("job_id"), accountID: r.optUUID("account_id"))
+        }
+    }
+
+    /// Keeps the log to 90 days.
+    public func pruneEvents(now: Date = Date()) throws {
+        try db.run("DELETE FROM events WHERE at < ?", [now.addingTimeInterval(-90 * 24 * 3600)])
     }
 
     // MARK: Helpers

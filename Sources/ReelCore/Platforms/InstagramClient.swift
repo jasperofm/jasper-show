@@ -95,46 +95,77 @@ public struct InstagramClient: PlatformClient {
         guard let igID = req.account.remoteID else { throw PlatformError(platform: platform, message: "Account has no Instagram user id") }
         let token = tokens.accessToken
 
-        // Respect the daily publishing cap.
-        let limitURL = graph.appendingPathComponent("\(igID)/content_publishing_limit")
-            .with(query: ["fields": "quota_usage,config", "access_token": token])
-        if let limit = (try await http.json(.make(limitURL))["data"] as? [[String: Any]])?.first,
-           let used = limit.double("quota_usage"), let total = limit.dict("config")?.double("quota_total"), used >= total {
-            throw PlatformError(platform: platform, httpStatus: 429,
-                                message: "Daily publishing limit reached (\(Int(used))/\(Int(total))).", retryAfter: 3600)
+        // Resuming: ask Instagram what happened to the earlier container first.
+        // A container is only ever published by an explicit media_publish call,
+        // so one that was never uploaded can simply be abandoned.
+        var resumed: String?
+        if let cp = req.resume, cp.step != .created {
+            let status = try? await http.json(.make(statusURL(cp.remoteID, token)))
+            switch status?.string("status_code") {
+            case "PUBLISHED":
+                return try await findPublished(igID: igID, caption: req.caption, since: cp.savedAt, token: token)
+                    ?? PublishResult(remotePostID: cp.remoteID, url: nil)
+            case "FINISHED", "IN_PROGRESS":
+                resumed = cp.remoteID
+            default:
+                // Expired or errored. If publish was already requested, look for the post before starting over.
+                if cp.step == .publishRequested {
+                    if let found = try await findPublished(igID: igID, caption: req.caption, since: cp.savedAt, token: token) {
+                        return found
+                    }
+                    if status == nil { throw PlatformError.unconfirmed(platform, "container status unavailable") }
+                }
+            }
         }
 
-        // 1. Create a resumable Reels container.
-        let createURL = graph.appendingPathComponent("\(igID)/media").with(query: [
-            "media_type": "REELS", "upload_type": "resumable", "caption": req.caption,
-            // Instagram has no per-post privacy; visibility follows the account's setting.
-            "share_to_feed": "true", "access_token": token,
-        ])
-        let created = try await http.json(.make(createURL, method: "POST"))
-        guard let containerID = created.string("id"), let uploadURI = created.string("uri").flatMap(URL.init(string:)) else {
-            throw PlatformError(platform: platform, message: "Could not create a media container")
-        }
+        if resumed == nil {
+            // Respect the daily publishing cap.
+            let limitURL = graph.appendingPathComponent("\(igID)/content_publishing_limit")
+                .with(query: ["fields": "quota_usage,config", "access_token": token])
+            if let limit = (try await http.json(.make(limitURL))["data"] as? [[String: Any]])?.first,
+               let used = limit.double("quota_usage"), let total = limit.dict("config")?.double("quota_total"), used >= total {
+                throw PlatformError(platform: platform, httpStatus: 429,
+                                    message: "Daily publishing limit reached (\(Int(used))/\(Int(total))).", retryAfter: 3600)
+            }
 
-        // 2. Upload the file.
-        let size = try FileManager.default.attributesOfItem(atPath: req.videoURL.path)[.size] as? Int ?? 0
-        var up = URLRequest(url: uploadURI)
-        up.httpMethod = "POST"
-        up.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization")
-        up.setValue("0", forHTTPHeaderField: "offset")
-        up.setValue(String(size), forHTTPHeaderField: "file_size")
-        progress(.uploading(0))
-        _ = try await http.upload(up, fromFile: req.videoURL)
-        progress(.uploading(1))
+            // 1. Create a resumable Reels container.
+            let createURL = graph.appendingPathComponent("\(igID)/media").with(query: [
+                "media_type": "REELS", "upload_type": "resumable", "caption": req.caption,
+                // Instagram has no per-post privacy; visibility follows the account's setting.
+                "share_to_feed": "true", "access_token": token,
+            ])
+            let created = try await http.json(.make(createURL, method: "POST"))
+            guard let id = created.string("id"), let uploadURI = created.string("uri").flatMap(URL.init(string:)) else {
+                throw PlatformError(platform: platform, message: "Could not create a media container")
+            }
+            await req.checkpoint(.created, id)
+
+            // 2. Upload the file.
+            let size = try FileManager.default.attributesOfItem(atPath: req.videoURL.path)[.size] as? Int ?? 0
+            var up = URLRequest(url: uploadURI)
+            up.httpMethod = "POST"
+            up.setValue("OAuth \(token)", forHTTPHeaderField: "Authorization")
+            up.setValue("0", forHTTPHeaderField: "offset")
+            up.setValue(String(size), forHTTPHeaderField: "file_size")
+            progress(.uploading(0))
+            _ = try await http.upload(up, fromFile: req.videoURL)
+            progress(.uploading(1))
+            await req.checkpoint(.uploaded, id)
+            resumed = id
+        }
+        guard let containerID = resumed else { throw PlatformError(platform: platform, message: "No media container") }
 
         // 3. Wait for processing.
         progress(.processing)
-        let statusURL = graph.appendingPathComponent(containerID).with(query: ["fields": "status_code,status", "access_token": token])
         var finished = false
-        for _ in 0..<60 {
-            try await pollDelay(5)
-            let s = try await http.json(.make(statusURL))
+        for i in 0..<60 {
+            if i > 0 || req.resume == nil { try await pollDelay(5) }
+            let s = try await http.json(.make(statusURL(containerID, token)))
             switch s.string("status_code") {
             case "FINISHED": finished = true
+            case "PUBLISHED":
+                return try await findPublished(igID: igID, caption: req.caption, since: Date().addingTimeInterval(-86400), token: token)
+                    ?? PublishResult(remotePostID: containerID, url: nil)
             case "ERROR", "EXPIRED":
                 throw PlatformError(platform: platform, httpStatus: 400, message: s.string("status") ?? "Processing failed")
             default: break
@@ -143,7 +174,8 @@ public struct InstagramClient: PlatformClient {
         }
         guard finished else { throw PlatformError(platform: platform, message: "Still processing after 5 minutes") }
 
-        // 4. Publish.
+        // 4. Publish. Saved first, so a crash here is checked on the next try.
+        await req.checkpoint(.publishRequested, containerID)
         let pubURL = graph.appendingPathComponent("\(igID)/media_publish").with(query: ["creation_id": containerID, "access_token": token])
         let pub = try await http.json(.make(pubURL, method: "POST"))
         guard let mediaID = pub.string("id") else { throw PlatformError(platform: platform, message: "Publish returned no media id") }
@@ -151,5 +183,26 @@ public struct InstagramClient: PlatformClient {
         let linkURL = graph.appendingPathComponent(mediaID).with(query: ["fields": "permalink", "access_token": token])
         let permalink = try? await http.json(.make(linkURL)).string("permalink")
         return PublishResult(remotePostID: mediaID, url: permalink)
+    }
+
+    private func statusURL(_ containerID: String, _ token: String) -> URL {
+        graph.appendingPathComponent(containerID).with(query: ["fields": "status_code,status", "access_token": token])
+    }
+
+    /// The account's own recent post with this caption, made after `since`.
+    /// Used when resuming, to recognise a post that already went out.
+    private func findPublished(igID: String, caption: String, since: Date, token: String) async throws -> PublishResult? {
+        let url = graph.appendingPathComponent("\(igID)/media")
+            .with(query: ["fields": "id,caption,permalink,timestamp", "limit": "10", "access_token": token])
+        let items = try await http.json(.make(url))["data"] as? [[String: Any]] ?? []
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        for m in items {
+            guard let id = m.string("id"), (m.string("caption") ?? "") == caption else { continue }
+            if let t = m.string("timestamp").flatMap(f.date(from:)), t < since.addingTimeInterval(-300) { continue }
+            return PublishResult(remotePostID: id, url: m.string("permalink"))
+        }
+        return nil
     }
 }

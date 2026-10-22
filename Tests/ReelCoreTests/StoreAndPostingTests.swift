@@ -40,10 +40,12 @@ final class LibraryStoreTests: XCTestCase {
     func testDueJobs() throws {
         let (_, v, acc) = try seed()
         let now = Date()
+        try store.upsert(PostJob(variationID: v.id, accountID: acc.id, status: .scheduled, scheduledAt: now.addingTimeInterval(-10), approvedAt: now))
+        try store.upsert(PostJob(variationID: v.id, accountID: acc.id, status: .scheduled, scheduledAt: now.addingTimeInterval(600), approvedAt: now))
+        try store.upsert(PostJob(variationID: v.id, accountID: acc.id, status: .failed, nextAttemptAt: now.addingTimeInterval(-1), approvedAt: now))
+        try store.upsert(PostJob(variationID: v.id, accountID: acc.id, status: .failed, approvedAt: now)) // manual retry only
+        // A draft is never due, even with a time set.
         try store.upsert(PostJob(variationID: v.id, accountID: acc.id, status: .scheduled, scheduledAt: now.addingTimeInterval(-10)))
-        try store.upsert(PostJob(variationID: v.id, accountID: acc.id, status: .scheduled, scheduledAt: now.addingTimeInterval(600)))
-        try store.upsert(PostJob(variationID: v.id, accountID: acc.id, status: .failed, nextAttemptAt: now.addingTimeInterval(-1)))
-        try store.upsert(PostJob(variationID: v.id, accountID: acc.id, status: .failed)) // manual retry only
         XCTAssertEqual(try store.dueJobs(now: now).count, 2)
     }
 

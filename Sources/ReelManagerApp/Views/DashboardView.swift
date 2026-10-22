@@ -9,6 +9,7 @@ struct DashboardView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
+                PublishingBanner()
 
                 LazyVGrid(columns: grid, spacing: 12) {
                     StatTile(title: "Videos", value: "\(app.assets.count)", icon: "film", tint: .purple)
@@ -138,7 +139,7 @@ struct JobLine: View {
                 Text(app.account(id: job.accountID)?.handle ?? "").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            StatusPill(status: job.status)
+            StatusPill(job: job)
             if let date {
                 Text(date.formatted(date: .abbreviated, time: .shortened))
                     .font(.caption).foregroundStyle(.secondary).frame(width: 120, alignment: .trailing)
@@ -148,9 +149,10 @@ struct JobLine: View {
 }
 
 struct StatusPill: View {
-    let status: PostStatus
+    let job: PostJob
+    private var status: PostStatus { job.status }
     var body: some View {
-        Text(status.rawValue.capitalized)
+        Text(job.stateLabel)
             .font(.caption2.weight(.semibold))
             .padding(.horizontal, 8).padding(.vertical, 3)
             .background(Capsule().fill(color.opacity(0.15)))
@@ -162,7 +164,8 @@ struct StatusPill: View {
         case .failed: return .red
         case .scheduled: return .orange
         case .uploading, .processing: return .blue
-        case .pending: return .purple
+        case .pending: return job.isApproved ? .teal : .purple
+        case .held: return .yellow
         case .cancelled: return .gray
         }
     }

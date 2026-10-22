@@ -15,6 +15,7 @@ struct ScheduleView: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button { app.showActivity = true } label: { Label("Activity", systemImage: "list.bullet.clipboard") }
                 Button { app.showScheduleAll = true } label: {
                     Label("Schedule Queue (\(app.schedulableJobs.count))", systemImage: "calendar.badge.plus")
                 }
@@ -36,7 +37,7 @@ struct PostingTrackerView: View {
     @State private var logJob: PostJob?
 
     enum Filter: String, CaseIterable, Identifiable {
-        case all = "All", queued = "Queued", scheduled = "Scheduled", failed = "Failed", posted = "Posted"
+        case all = "All", drafts = "Drafts", queued = "Queued", scheduled = "Scheduled", failed = "Failed", posted = "Posted"
         var id: String { rawValue }
     }
 
@@ -44,8 +45,9 @@ struct PostingTrackerView: View {
         app.jobs.filter { j in
             switch filter {
             case .all: return j.status != .cancelled
-            case .queued: return j.status == .pending || j.status.isActive
-            case .scheduled: return j.status == .scheduled
+            case .drafts: return j.status == .pending && !j.isApproved
+            case .queued: return (j.status == .pending && j.isApproved) || j.status.isActive
+            case .scheduled: return j.status == .scheduled || j.status == .held
             case .failed: return j.status == .failed
             case .posted: return j.status == .posted
             }
@@ -66,6 +68,11 @@ struct PostingTrackerView: View {
                 }
                 .pickerStyle(.segmented)
                 .fixedSize()
+                let drafts = app.drafts
+                if !drafts.isEmpty {
+                    Button("Approve Drafts (\(drafts.count))") { app.approve(drafts) }
+                        .help("Approved posts can be scheduled. Nothing is published without approval.")
+                }
                 let failed = app.jobs.filter { $0.status == .failed }
                 Button("Retry Failed (\(failed.count))") { app.post(failed) }
                     .disabled(failed.isEmpty)
@@ -115,6 +122,7 @@ struct PostingTrackerView: View {
     private func whenText(_ j: PostJob) -> String {
         switch j.status {
         case .scheduled: return j.scheduledAt.map { $0.formatted(date: .abbreviated, time: .shortened) } ?? "–"
+        case .held: return j.nextAttemptAt.map { "Recheck \($0.formatted(date: .omitted, time: .shortened))" } ?? "Held"
         case .failed:
             if let n = j.nextAttemptAt { return "Retry \(n.formatted(date: .omitted, time: .shortened))" }
             return j.updatedAt.formatted(date: .abbreviated, time: .shortened)
@@ -138,10 +146,13 @@ struct PostingTrackerView: View {
     private func actions(_ j: PostJob) -> some View {
         HStack(spacing: 6) {
             switch j.status {
+            case .pending where !j.isApproved:
+                Button("Approve") { app.approve([j]) }
+                Button("Cancel") { app.cancel(j) }
             case .pending:
                 Button("Post") { app.post([j]) }
-                Button("Cancel") { app.cancel(j) }
-            case .scheduled:
+                Button("Unapprove") { app.unapprove(j) }
+            case .scheduled, .held:
                 Button("Post Now") { app.post([j]) }
                 Button("Unschedule") { app.unschedule(j) }
             case .failed:
@@ -179,10 +190,13 @@ struct StatusCell: View {
                     Text("Processing")
                 }
             } else {
-                StatusPill(status: job.status)
+                StatusPill(job: job)
+                if job.status == .held, let why = job.holdReason {
+                    Text(why).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
             }
         }
-        .help(job.lastError ?? "")
+        .help(job.holdReason ?? job.lastError ?? "")
     }
 }
 
@@ -190,10 +204,15 @@ struct AttemptLogSheet: View {
     @EnvironmentObject var app: AppState
     @Environment(\.dismiss) var dismiss
     let job: PostJob
+    @State private var confirmStartOver = false
 
     var body: some View {
         VStack(alignment: .leading) {
             Text("Attempt Log").font(.title3.bold())
+            if let cp = job.checkpoint {
+                Text("An earlier attempt reached “\(cp.step.label)” at \(cp.savedAt.formatted(date: .abbreviated, time: .shortened)). The next try checks the platform first, so it won't post twice.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if let e = job.lastError { Text(e).foregroundStyle(.red).font(.callout) }
             if !job.caption.isEmpty { Text("Caption: \(job.caption)").font(.caption).foregroundStyle(.secondary).lineLimit(3) }
             List((try? app.store.attempts(for: job.id)) ?? []) { a in
@@ -209,10 +228,22 @@ struct AttemptLogSheet: View {
                 }
             }
             .frame(minHeight: 220)
-            HStack { Spacer(); Button("Close") { dismiss() }.keyboardShortcut(.cancelAction) }
+            HStack {
+                if job.checkpoint != nil && job.status == .failed {
+                    Button("Start Over…") { confirmStartOver = true }
+                        .help("Forget the earlier attempt and upload again. Only do this after checking the post isn't on the account.")
+                }
+                Spacer()
+                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
         }
         .padding(18)
         .frame(width: 520, height: 400)
+        .confirmationDialog("Start this post over?", isPresented: $confirmStartOver) {
+            Button("Start Over") { app.startOver(job); dismiss() }
+        } message: {
+            Text("Open the account and make sure the post isn't there. If it is, starting over would post it twice.")
+        }
     }
 }
 
@@ -248,6 +279,13 @@ struct ScheduleAllSheet: View {
                 }
             }
             .frame(minHeight: 200)
+            if dates.contains(where: { PublishGate.isInLikelySleepWindow($0) }) {
+                SleepWarning()
+            }
+            if !app.drafts.isEmpty {
+                Text("\(app.drafts.count) draft\(app.drafts.count == 1 ? " isn't" : "s aren't") included. Approve drafts first on the Schedule page.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)

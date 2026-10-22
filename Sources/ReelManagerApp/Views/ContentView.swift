@@ -33,6 +33,7 @@ struct ContentView: View {
         .sheet(item: $app.wizardPlatform) { p in SetupWizard(platform: p) }
         .sheet(isPresented: $app.showScheduleAll) { ScheduleAllSheet() }
         .sheet(isPresented: $app.showHelp) { HelpView() }
+        .sheet(isPresented: $app.showActivity) { ActivityLogSheet() }
         .sheet(isPresented: Binding(get: { !didFinishOnboarding }, set: { if !$0 { didFinishOnboarding = true } })) {
             OnboardingView { didFinishOnboarding = true }
         }

@@ -82,6 +82,31 @@ public struct TikTokClient: PlatformClient {
 
     public func publish(_ req: PublishRequest, tokens: OAuthTokens,
                         progress: @escaping @Sendable (PublishStage) -> Void) async throws -> PublishResult {
+        // Resuming: with FILE_UPLOAD, TikTok posts once the upload completes.
+        // Check the earlier publish id; start over only if it failed or its
+        // upload never finished.
+        if let cp = req.resume {
+            let d: [String: Any]
+            do {
+                d = try await publishStatus(cp.remoteID, tokens: tokens)
+            } catch let e as PlatformError where e.isRetryable {
+                throw e
+            } catch {
+                throw PlatformError.unconfirmed(platform, "TikTok didn't return the earlier post's status")
+            }
+            switch d.string("status") {
+            case "PUBLISH_COMPLETE":
+                return result(d, publishID: cp.remoteID)
+            case "FAILED":
+                break
+            case "PROCESSING_UPLOAD" where cp.step == .created:
+                break
+            default:
+                progress(.processing)
+                return try await waitForPublish(cp.remoteID, tokens: tokens)
+            }
+        }
+
         let options = try await privacyOptions(tokens: tokens)
         let wanted: String
         switch req.privacy {
@@ -107,6 +132,7 @@ public struct TikTokClient: PlatformClient {
               let uploadURL = data.string("upload_url").flatMap(URL.init(string:)) else {
             throw PlatformError(platform: platform, message: "TikTok did not return an upload URL")
         }
+        await req.checkpoint(.created, publishID)
 
         let handle = try FileHandle(forReadingFrom: req.videoURL)
         defer { try? handle.close() }
@@ -122,17 +148,30 @@ public struct TikTokClient: PlatformClient {
             _ = try await http.upload(put, data: chunk)
             progress(.uploading(Double(i + 1) / Double(plan.count)))
         }
+        await req.checkpoint(.uploaded, publishID)
 
         progress(.processing)
+        return try await waitForPublish(publishID, tokens: tokens)
+    }
+
+    private func publishStatus(_ publishID: String, tokens: OAuthTokens) async throws -> [String: Any] {
+        let s = try await http.json(.make(base.appendingPathComponent("post/publish/status/fetch/"),
+                                          method: "POST", bearer: tokens.accessToken, json: ["publish_id": publishID]))
+        return s.dict("data") ?? [:]
+    }
+
+    private func result(_ d: [String: Any], publishID: String) -> PublishResult {
+        let postID = (d["publicaly_available_post_id"] as? [Any])?.first.map { "\($0)" }
+        return PublishResult(remotePostID: postID ?? publishID, url: nil)
+    }
+
+    private func waitForPublish(_ publishID: String, tokens: OAuthTokens) async throws -> PublishResult {
         for _ in 0..<60 {
             try await pollDelay(5)
-            let s = try await http.json(.make(base.appendingPathComponent("post/publish/status/fetch/"),
-                                              method: "POST", bearer: tokens.accessToken, json: ["publish_id": publishID]))
-            let d = s.dict("data") ?? [:]
+            let d = try await publishStatus(publishID, tokens: tokens)
             switch d.string("status") {
             case "PUBLISH_COMPLETE":
-                let postID = (d["publicaly_available_post_id"] as? [Any])?.first.map { "\($0)" }
-                return PublishResult(remotePostID: postID ?? publishID, url: nil)
+                return result(d, publishID: publishID)
             case "FAILED":
                 throw PlatformError(platform: platform, httpStatus: 400, message: d.string("fail_reason") ?? "Processing failed")
             default:

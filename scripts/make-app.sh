@@ -12,6 +12,10 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ReelManager"
 cp Config/Info.plist "$APP/Contents/Info.plist"
+# Launch agent for the background publisher (registered from Settings).
+mkdir -p "$APP/Contents/Library/LaunchAgents"
+cp Config/com.reelmanager.app.publisher.plist "$APP/Contents/Library/LaunchAgents/"
+plutil -lint "$APP/Contents/Library/LaunchAgents/com.reelmanager.app.publisher.plist"
 
 # App icon: draw it, then pack every size into an .icns.
 ICONSET="$OUT/AppIcon.iconset"
