@@ -73,10 +73,10 @@ final class AppState: ObservableObject {
         importer = MediaImporter(store: store)
         accountService = AccountService(store: store)
         posting = PostingService(store: store, accounts: accountService)
-        posting.onChange = { [weak self] in self?.reloadJobs(); self?.reloadAccounts() }
-        posting.onProgress = { [weak self] id, stage in self?.uploadProgress[id] = stage }
         scheduler = PostScheduler(store: store, posting: posting)
         analytics = AnalyticsService(store: store, accounts: accountService)
+        posting.onChange = { [weak self] in self?.reloadJobs(); self?.reloadAccounts() }
+        posting.onProgress = { [weak self] id, stage in self?.uploadProgress[id] = stage }
         posting.onFinished = { [weak self] job in self?.postFinished(job) }
         scheduler.onStateChange = { [weak self] in self?.nextScheduledRun = self?.scheduler.nextWake }
 
