@@ -18,7 +18,7 @@ public struct TikTokClient: PlatformClient {
             "client_key": config.clientID,
             "redirect_uri": config.redirectURI,
             "response_type": "code",
-            "scope": "user.info.basic,video.publish",
+            "scope": "user.info.basic,video.publish,video.list",
             "state": state,
             "code_challenge": pkce.hexChallenge,
             "code_challenge_method": "S256",
@@ -57,6 +57,20 @@ public struct TikTokClient: PlatformClient {
             throw PlatformError(platform: platform, message: "Could not read the TikTok profile")
         }
         return RemoteProfile(remoteID: id, username: user.string("display_name") ?? id)
+    }
+
+    /// Needs the `video.list` scope. Only works once TikTok has assigned a
+    /// public post id (not for private SELF_ONLY posts).
+    public func fetchMetrics(remotePostID: String, account: Account, tokens: OAuthTokens) async throws -> PostMetrics {
+        let url = base.appendingPathComponent("video/query/")
+            .with(query: ["fields": "id,view_count,like_count,comment_count,share_count"])
+        let j = try await http.json(.make(url, method: "POST", bearer: tokens.accessToken,
+                                          json: ["filters": ["video_ids": [remotePostID]]]))
+        guard let v = (j.dict("data")?["videos"] as? [[String: Any]])?.first else {
+            throw PlatformError(platform: platform, message: "TikTok doesn't report stats for this post yet")
+        }
+        return PostMetrics(views: v.int("view_count"), likes: v.int("like_count"),
+                           comments: v.int("comment_count"), shares: v.int("share_count"))
     }
 
     /// Privacy levels this creator may use right now (required before each post).

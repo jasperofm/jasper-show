@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import CoreImage
+import AppKit
 
 public enum RenderError: Error, LocalizedError {
     case noVideoTrack
@@ -119,6 +120,9 @@ public enum VariationRenderer {
                 "inputNeutral": CIVector(x: 6500, y: 0),
                 "inputTargetNeutral": CIVector(x: s.temperature, y: 0),
             ])
+        }
+        if let overlay = s.overlay, !overlay.isEmpty {
+            img = OverlayRenderer.shared.image(for: overlay, renderSize: renderSize).composited(over: img)
         }
         return img.cropped(to: CGRect(origin: .zero, size: renderSize))
     }

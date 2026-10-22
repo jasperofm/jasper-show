@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reel Manager sign-in</title>
+<style>
+  body { font: 16px -apple-system, system-ui, sans-serif; background: #f5f5f7; color: #1d1d1f;
+         display: grid; place-items: center; min-height: 100vh; margin: 0; padding: 16px; }
+  @media (prefers-color-scheme: dark) { body { background: #1d1d1f; color: #f5f5f7; } }
+  a { color: #0a84ff; }
+</style>
+</head>
+<body>
+<main>
+  <p>Returning to Reel Manager…</p>
+  <p id="manual" hidden>If nothing happens, <a id="link" href="#">click here to finish signing in</a>.</p>
+</main>
+<script>
+  // Instagram only allows https redirect URIs. This page hands the
+  // authorization code back to the Mac app's reelmanager:// URL scheme.
+  var target = "reelmanager://oauth/tiktok" + window.location.search;
+  document.getElementById("link").href = target;
+  window.location.replace(target);
+  setTimeout(function () { document.getElementById("manual").hidden = false; }, 1500);
+</script>
+</body>
+</html>

@@ -86,6 +86,20 @@ enum Schema {
         );
         CREATE INDEX idx_attempts_job ON post_attempts(job_id, started_at);
         """,
+        // 2: Analytics snapshots, one row per post (latest numbers win).
+        """
+        CREATE TABLE post_stats (
+            job_id TEXT PRIMARY KEY REFERENCES post_jobs(id) ON DELETE CASCADE,
+            views INTEGER,
+            likes INTEGER,
+            comments INTEGER,
+            shares INTEGER,
+            reach INTEGER,
+            fetched_at REAL NOT NULL,
+            error TEXT
+        );
+        ALTER TABLE post_jobs ADD COLUMN overlay_json TEXT;
+        """,
     ]
 
     static func migrate(_ db: SQLiteDatabase) throws {

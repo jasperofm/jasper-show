@@ -24,6 +24,9 @@ struct ReelManagerApp: App {
                 Button("New Variation") { app.newVariation() }
                     .keyboardShortcut("n", modifiers: [.command])
                     .disabled(app.selectedAssetID == nil)
+                Button("Compose Post…") { app.openCompose() }
+                    .keyboardShortcut("p", modifiers: [.command, .shift])
+                Divider()
             }
             CommandGroup(replacing: .undoRedo) {
                 // ⌘Z / ⇧⌘Z drive the variation editor's undo stack.
@@ -40,8 +43,11 @@ struct ReelManagerApp: App {
                     .disabled(app.editor == nil)
             }
             CommandMenu("Accounts") {
-                Button("Sync All Accounts") { Task { await app.syncAccounts() } }
+                Button("Add Account…") { app.showAddAccount = true }
+                Button("Check All Connections") { Task { await app.syncAccounts() } }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
+                Divider()
+                Button("Refresh Stats") { Task { await app.syncStats() } }
             }
             CommandGroup(replacing: .help) {
                 Button("Reel Manager Help") { app.showHelp = true }

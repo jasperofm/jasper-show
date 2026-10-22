@@ -13,6 +13,16 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/ReelManager"
 cp Config/Info.plist "$APP/Contents/Info.plist"
 
+# App icon: draw it, then pack every size into an .icns.
+ICONSET="$OUT/AppIcon.iconset"
+rm -rf "$ICONSET" && mkdir -p "$ICONSET"
+swift scripts/make-icon.swift "$OUT/AppIcon.png"
+for s in 16 32 128 256 512; do
+  sips -z $s $s "$OUT/AppIcon.png" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+  sips -z $((s*2)) $((s*2)) "$OUT/AppIcon.png" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+
 # Ad-hoc signature: not notarized, but required for arm64 and keeps the
 # Keychain and URL-scheme handling happy.
 codesign --force --deep --sign - "$APP"

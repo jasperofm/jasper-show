@@ -45,6 +45,10 @@ public struct EditSettings: Codable, Equatable, Sendable {
     /// Kelvin. 6500 = neutral.
     public var temperature: Double = 6500
 
+    // MARK: Text
+    /// Optional on-screen text burned into the video.
+    public var overlay: TextOverlay?
+
     // MARK: Timing
     /// Sections of the source to remove.
     public var cuts: [TimeRange] = []
@@ -140,8 +144,45 @@ public struct EditSettings: Codable, Equatable, Sendable {
             out.append(String(format: "%d cut(s), %.1fs removed", cuts.count, total))
         }
         if speed != d.speed { out.append(String(format: "Speed %.2f×", speed)) }
+        if let o = overlay, !o.isEmpty { out.append("Text \"\(o.text.prefix(24))\"") }
         return out.isEmpty ? ["No edits"] : out
     }
+}
+
+/// Text drawn on top of the video.
+public struct TextOverlay: Codable, Equatable, Hashable, Sendable {
+    public enum Position: String, Codable, CaseIterable, Sendable {
+        case top, center, bottom
+        public var label: String { rawValue.capitalized }
+    }
+    public enum Style: String, Codable, CaseIterable, Sendable {
+        /// White text on a dark translucent box.
+        case darkBox
+        /// Black text on a white box.
+        case lightBox
+        /// White text, no box.
+        case plain
+        public var label: String {
+            switch self {
+            case .darkBox: return "White on dark"
+            case .lightBox: return "Black on white"
+            case .plain: return "White text"
+            }
+        }
+    }
+
+    public var text: String
+    public var position: Position
+    public var style: Style
+    /// Text height as a fraction of the frame height.
+    public var size: Double
+
+    public init(text: String = "", position: Position = .top, style: Style = .darkBox, size: Double = 0.05) {
+        self.text = text; self.position = position; self.style = style; self.size = size
+    }
+
+    public var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    public static let sizeRange: ClosedRange<Double> = 0.025...0.12
 }
 
 public enum OutputAspect: String, Codable, CaseIterable, Sendable {

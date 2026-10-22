@@ -30,6 +30,7 @@ struct PlatformConfigForm: View {
             TextField("Redirect URI", text: $config.redirectURI)
             Text(hint).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
+                Button("Open Setup Guide…") { app.wizardPlatform = platform }
                 Spacer()
                 if saved { Text("Saved").foregroundStyle(.secondary) }
                 Button("Save") {
@@ -44,6 +45,8 @@ struct PlatformConfigForm: View {
 
     private var hint: String {
         switch platform {
+        case .facebook:
+            return "Same Meta app as Instagram works. Use the App ID and App secret from App settings → Basic. Posts Reels to the Pages you manage."
         case .instagram:
             return "Meta app with Instagram Login. Instagram needs an https redirect URI that forwards to reelmanager://oauth (see README). Professional accounts only."
         case .tiktok:

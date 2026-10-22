@@ -60,6 +60,16 @@ public struct YouTubeClient: PlatformClient {
         return RemoteProfile(remoteID: id, username: name)
     }
 
+    public func fetchMetrics(remotePostID: String, account: Account, tokens: OAuthTokens) async throws -> PostMetrics {
+        let url = URL(string: "https://www.googleapis.com/youtube/v3/videos")!
+            .with(query: ["part": "statistics", "id": remotePostID])
+        let j = try await http.json(.make(url, bearer: tokens.accessToken))
+        guard let stats = (j["items"] as? [[String: Any]])?.first?.dict("statistics") else {
+            throw PlatformError(platform: platform, message: "Video not found (it may have been deleted)")
+        }
+        return PostMetrics(views: stats.int("viewCount"), likes: stats.int("likeCount"), comments: stats.int("commentCount"))
+    }
+
     public func publish(_ req: PublishRequest, tokens: OAuthTokens,
                         progress: @escaping @Sendable (PublishStage) -> Void) async throws -> PublishResult {
         let size = try FileManager.default.attributesOfItem(atPath: req.videoURL.path)[.size] as? Int ?? 0

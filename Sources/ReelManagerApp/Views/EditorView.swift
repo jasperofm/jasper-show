@@ -54,6 +54,14 @@ struct EditorControls: View {
                     slider("Temperature", \.temperature, EditSettings.temperatureRange, format: "%.0fK")
                 }
 
+                section("On-screen text", reset: { editor.update("Remove Text") { $0.overlay = nil } }) {
+                    OverlayEditor(overlay: Binding(get: { editor.settings.overlay ?? TextOverlay() },
+                                                   set: { o in editor.update("Text") { $0.overlay = o.isEmpty ? nil : o } }),
+                                  placeholder: "Add text on the video")
+                    Text("You can also set different text per account when you compose a post.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
                 section("Timing", reset: { editor.reset("Timing", [\.cuts, \.speed]) }) {
                     slider("Speed", \.speed, EditSettings.speedRange, format: "%.2f×")
                     CutsEditor(editor: editor, preview: preview)
@@ -69,7 +77,7 @@ struct EditorControls: View {
                     } else {
                         HStack {
                             Button("Export") { editor.export() }
-                            Button("Post…") { app.postSheetVariation = editor.variation }
+                            Button("Compose Post…") { app.openCompose(editor.variation) }
                                 .disabled(editor.variation.needsExport)
                                 .help(editor.variation.needsExport ? "Export the latest edits first" : "Assign to accounts and post")
                         }

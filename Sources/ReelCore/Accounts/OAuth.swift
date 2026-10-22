@@ -27,6 +27,24 @@ public struct PlatformAppConfig: Codable, Equatable, Sendable {
     }
 }
 
+/// Redirect URIs the setup wizard fills in for you.
+public enum OAuthRedirects {
+    /// GitHub Pages site hosting the small "back to the app" pages in /docs/oauth.
+    /// Meta and TikTok only accept https redirects; those pages forward to reelmanager://.
+    public static var pagesBase = "https://jasperofm.github.io/jasper-show"
+
+    public static func suggested(for p: Platform, clientID: String) -> String {
+        switch p {
+        case .instagram, .facebook, .tiktok:
+            return "\(pagesBase)/oauth/\(p.rawValue)/"
+        case .youtube:
+            // Google iOS-type clients use the reversed client ID as a custom scheme.
+            let prefix = clientID.replacingOccurrences(of: ".apps.googleusercontent.com", with: "")
+            return prefix.isEmpty ? "" : "com.googleusercontent.apps.\(prefix):/oauth2redirect"
+        }
+    }
+}
+
 public final class PlatformConfigStore: @unchecked Sendable {
     private let defaults: UserDefaults
     private let keychain: KeychainStore

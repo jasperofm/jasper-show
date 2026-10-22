@@ -209,17 +209,17 @@ public final class LibraryStore: @unchecked Sendable {
         try db.run("""
             INSERT INTO post_jobs (id, variation_id, account_id, caption, title, privacy, status, scheduled_at,
                 next_attempt_at, attempt_count, remote_post_id, remote_url, last_error, batch_id, created_at,
-                updated_at, posted_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                updated_at, posted_at, overlay_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(id) DO UPDATE SET caption = excluded.caption, title = excluded.title,
-                privacy = excluded.privacy, status = excluded.status,
+                privacy = excluded.privacy, status = excluded.status, overlay_json = excluded.overlay_json,
                 scheduled_at = excluded.scheduled_at, next_attempt_at = excluded.next_attempt_at,
                 attempt_count = excluded.attempt_count, remote_post_id = excluded.remote_post_id,
                 remote_url = excluded.remote_url, last_error = excluded.last_error,
                 batch_id = excluded.batch_id, updated_at = excluded.updated_at, posted_at = excluded.posted_at
             """, [j.id, j.variationID, j.accountID, j.caption, j.title, j.privacy.rawValue, j.status.rawValue, j.scheduledAt, j.nextAttemptAt,
                   j.attemptCount, j.remotePostID, j.remoteURL, j.lastError, j.batchID, j.createdAt,
-                  j.updatedAt, j.postedAt])
+                  j.updatedAt, j.postedAt, j.overlay.flatMap { try? json($0) }])
     }
 
     public func jobs() throws -> [PostJob] {
@@ -248,12 +248,53 @@ public final class LibraryStore: @unchecked Sendable {
     private func mapJob(_ r: Row) -> PostJob {
         PostJob(id: r.uuid("id"), variationID: r.uuid("variation_id"), accountID: r.uuid("account_id"),
                 caption: r.string("caption"), title: r.string("title"),
-                privacy: PostPrivacy(rawValue: r.string("privacy")) ?? .publicAudience, status: PostStatus(rawValue: r.string("status")) ?? .failed,
+                privacy: PostPrivacy(rawValue: r.string("privacy")) ?? .publicAudience,
+                overlay: r.optString("overlay_json").flatMap { try? decoder.decode(TextOverlay.self, from: Data($0.utf8)) },
+                status: PostStatus(rawValue: r.string("status")) ?? .failed,
                 scheduledAt: r.optDate("scheduled_at"), nextAttemptAt: r.optDate("next_attempt_at"),
                 attemptCount: r.int("attempt_count"), remotePostID: r.optString("remote_post_id"),
                 remoteURL: r.optString("remote_url"), lastError: r.optString("last_error"),
                 batchID: r.optUUID("batch_id"), createdAt: r.date("created_at"),
                 updatedAt: r.date("updated_at"), postedAt: r.optDate("posted_at"))
+    }
+
+    /// Jobs left mid-upload by a quit or crash go back to failed so they can be retried.
+    public func resetInterruptedJobs(now: Date = Date()) throws {
+        try db.run("""
+            UPDATE post_jobs SET status = 'failed', last_error = 'Interrupted (the app was closed during upload).',
+                next_attempt_at = ?, updated_at = ? WHERE status IN ('uploading', 'processing')
+            """, [now, now])
+    }
+
+    /// Next time the scheduler has something to do, if anything.
+    public func nextWakeDate() throws -> Date? {
+        try db.query("""
+            SELECT MIN(t) AS t FROM (
+                SELECT scheduled_at AS t FROM post_jobs WHERE status = 'scheduled'
+                UNION ALL
+                SELECT next_attempt_at AS t FROM post_jobs WHERE status = 'failed' AND next_attempt_at IS NOT NULL)
+            """) { $0.optDate("t") }.first ?? nil
+    }
+
+    // MARK: Stats
+
+    public func upsert(_ s: PostStats) throws {
+        try db.run("""
+            INSERT INTO post_stats (job_id, views, likes, comments, shares, reach, fetched_at, error)
+            VALUES (?,?,?,?,?,?,?,?)
+            ON CONFLICT(job_id) DO UPDATE SET views = excluded.views, likes = excluded.likes,
+                comments = excluded.comments, shares = excluded.shares, reach = excluded.reach,
+                fetched_at = excluded.fetched_at, error = excluded.error
+            """, [s.jobID, s.views, s.likes, s.comments, s.shares, s.reach, s.fetchedAt, s.error])
+    }
+
+    public func stats() throws -> [UUID: PostStats] {
+        let rows = try db.query("SELECT * FROM post_stats") { r in
+            PostStats(jobID: r.uuid("job_id"), views: r.optInt("views"), likes: r.optInt("likes"),
+                      comments: r.optInt("comments"), shares: r.optInt("shares"), reach: r.optInt("reach"),
+                      fetchedAt: r.date("fetched_at"), error: r.optString("error"))
+        }
+        return Dictionary(rows.map { ($0.jobID, $0) }, uniquingKeysWith: { $1 })
     }
 
     // MARK: Attempts
@@ -278,7 +319,11 @@ public final class LibraryStore: @unchecked Sendable {
 
     // MARK: Helpers
 
-    private func json(_ s: EditSettings) throws -> String {
+    public func asset(id: UUID) throws -> SourceAsset? {
+        try assets().first { $0.id == id }
+    }
+
+    private func json<T: Encodable>(_ s: T) throws -> String {
         String(decoding: try encoder.encode(s), as: UTF8.self)
     }
 }

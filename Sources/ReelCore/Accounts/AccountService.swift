@@ -15,9 +15,13 @@ public final class AccountService {
         self.store = store; self.keychain = keychain; self.configs = configs; self.clients = clients
     }
 
-    /// Full OAuth2 flow: browser sign-in → code exchange → profile → Keychain + DB.
-    /// Pass `existing` to reconnect an account that is in the error state.
-    public func connect(_ platform: Platform, existing: Account? = nil) async throws -> Account {
+    public func isConfigured(_ platform: Platform) -> Bool { configs.config(for: platform).isComplete }
+
+    /// Full OAuth2 flow: browser sign-in → code exchange → profile(s) → Keychain + DB.
+    /// Returns every account the sign-in unlocked (several for a Facebook
+    /// user with multiple Pages). Pass `existing` to reconnect an account.
+    @discardableResult
+    public func connect(_ platform: Platform, existing: Account? = nil) async throws -> [Account] {
         let config = configs.config(for: platform)
         guard config.isComplete else { throw OAuthError.notConfigured(platform) }
         let client = clients(platform)
@@ -28,19 +32,25 @@ public final class AccountService {
             url: client.authorizationURL(config: config, pkce: pkce, state: state),
             callbackScheme: config.callbackScheme, expectedState: state)
         let tokens = try await client.exchange(code: code, pkce: pkce, config: config)
-        let profile = try await client.fetchProfile(tokens: tokens)
+        let found = try await client.connectableAccounts(tokens: tokens)
 
-        // Same remote account connected twice → update the existing row.
-        let match = try store.accounts().first { $0.platform == platform && $0.remoteID == profile.remoteID }
-        var account = existing ?? match ?? Account(platform: platform, username: profile.username)
-        account.username = profile.username
-        account.remoteID = profile.remoteID
-        account.status = .connected
-        account.statusMessage = nil
-        account.lastSyncAt = Date()
-        try keychain.save(tokens, for: account.keychainKey)
-        try store.upsert(account)
-        return account
+        var out: [Account] = []
+        let known = try store.accounts()
+        for item in found {
+            // Same remote account connected twice → update the existing row.
+            let match = known.first { $0.platform == platform && $0.remoteID == item.profile.remoteID }
+            let reuse = (existing?.remoteID == nil || existing?.remoteID == item.profile.remoteID) && found.count == 1 ? existing : nil
+            var account = match ?? reuse ?? Account(platform: platform, username: item.profile.username)
+            account.username = item.profile.username
+            account.remoteID = item.profile.remoteID
+            account.status = .connected
+            account.statusMessage = nil
+            account.lastSyncAt = Date()
+            try keychain.save(item.tokens, for: account.keychainKey)
+            try store.upsert(account)
+            out.append(account)
+        }
+        return out
     }
 
     public func disconnect(_ account: Account, remove: Bool) throws {

@@ -17,18 +17,17 @@ public enum PostingError: Error, LocalizedError {
 
 /// Runs post jobs against the platform clients and records every attempt.
 ///
-/// Phase 1 calls `send` when the user clicks Post. Phase 2's scheduler calls
-/// the same `send` for jobs returned by `LibraryStore.dueJobs()`, so manual,
-/// scheduled and retried posts share one code path, one rate limiter and one
-/// attempt log.
+/// "Post now" and the `PostScheduler` both call `send`, so manual, scheduled
+/// and retried posts share one code path, one rate limiter and one attempt log.
 @MainActor
 public final class PostingService {
     private let store: LibraryStore
     private let accounts: AccountService
     private let limiter: RateLimiter
     public let retryPolicy: RetryPolicy
-    /// Off in Phase 1: failures wait for a manual retry. Phase 2 turns it on
-    /// and the scheduler picks up `nextAttemptAt`.
+    /// When on, a failed post gets a `nextAttemptAt` from `retryPolicy`
+    /// (1, 5, 15 min) and the scheduler retries it. After the last retry it
+    /// waits in the tracker for a manual retry.
     public var automaticRetry: Bool
     /// Longest we'll hold a manual send for the rate limiter before failing it instead.
     public var maxInlineWait: TimeInterval = 90
@@ -36,9 +35,11 @@ public final class PostingService {
     private var running: Set<UUID> = []
     public var onChange: (() -> Void)?
     public var onProgress: ((UUID, PublishStage) -> Void)?
+    /// Called after every attempt with the updated job.
+    public var onFinished: ((PostJob) -> Void)?
 
     public init(store: LibraryStore, accounts: AccountService, limiter: RateLimiter = RateLimiter(),
-                retryPolicy: RetryPolicy = RetryPolicy(), automaticRetry: Bool = false) {
+                retryPolicy: RetryPolicy = RetryPolicy(), automaticRetry: Bool = true) {
         self.store = store; self.accounts = accounts; self.limiter = limiter
         self.retryPolicy = retryPolicy; self.automaticRetry = automaticRetry
     }
@@ -49,7 +50,8 @@ public final class PostingService {
     /// assigning twice doesn't create duplicate jobs.
     @discardableResult
     public func assign(variation: Variation, to targets: [Account], caption: String, title: String = "",
-                       privacy: PostPrivacy = .publicAudience, batchID: UUID? = nil) throws -> [PostJob] {
+                       privacy: PostPrivacy = .publicAudience, overlay: TextOverlay? = nil,
+                       batchID: UUID? = nil) throws -> [PostJob] {
         let existing = try store.jobs().filter { $0.variationID == variation.id }
         var out: [PostJob] = []
         for account in targets {
@@ -58,19 +60,49 @@ public final class PostingService {
                     j.caption = caption
                     j.title = title
                     j.privacy = privacy
+                    j.overlay = overlay
                     j.updatedAt = Date()
                     try store.upsert(j)
                 }
                 out.append(j)
             } else {
                 let j = PostJob(variationID: variation.id, accountID: account.id, caption: caption,
-                                title: title, privacy: privacy, batchID: batchID)
+                                title: title, privacy: privacy, overlay: overlay, batchID: batchID)
                 try store.upsert(j)
                 out.append(j)
             }
         }
         onChange?()
         return out
+    }
+
+    /// Schedules jobs: `dates[i]` is when `jobs[i]` goes out. Jobs already
+    /// posted or uploading are skipped. All scheduled jobs share one batch id.
+    @discardableResult
+    public func schedule(_ jobs: [PostJob], at dates: [Date]) throws -> UUID {
+        let batch = UUID()
+        for (job, date) in zip(jobs, dates) {
+            guard var j = try store.job(id: job.id), j.status != .posted, !running.contains(j.id) else { continue }
+            j.status = .scheduled
+            j.scheduledAt = date
+            j.nextAttemptAt = nil
+            j.batchID = batch
+            j.updatedAt = Date()
+            try store.upsert(j)
+        }
+        onChange?()
+        return batch
+    }
+
+    /// Takes a job off the schedule; it goes back to pending.
+    public func unschedule(_ job: PostJob) throws {
+        guard var j = try store.job(id: job.id), j.status == .scheduled || j.status == .failed else { return }
+        j.status = .pending
+        j.scheduledAt = nil
+        j.nextAttemptAt = nil
+        j.updatedAt = Date()
+        try store.upsert(j)
+        onChange?()
     }
 
     public func cancel(_ job: PostJob) throws {
@@ -83,14 +115,39 @@ public final class PostingService {
         onChange?()
     }
 
+    /// Renders this account's copy of the variation with its own on-screen
+    /// text. Reuses the file if neither the job nor the variation changed since.
+    private func renderWithOverlay(job: PostJob, variation: Variation, overlay: TextOverlay) async throws -> URL {
+        guard let asset = try store.asset(id: variation.assetID) else { throw PostingError.notFound }
+        let out = store.url(forRelative: "Exports/job-\(job.id.uuidString).mp4")
+        let fm = FileManager.default
+        if let made = (try? fm.attributesOfItem(atPath: out.path))?[.modificationDate] as? Date,
+           made > job.updatedAt, made > (variation.exportedAt ?? .distantPast) {
+            return out
+        }
+        var settings = variation.settings
+        settings.overlay = overlay
+        let jobID = job.id
+        onProgress?(jobID, .rendering(0))
+        try await VideoExporter().export(sourceURL: store.url(forRelative: asset.relativePath), settings: settings,
+                                         preset: variation.exportPreset ?? .high, to: out) { p in
+            Task { @MainActor in self.onProgress?(jobID, .rendering(p)) }
+        }
+        return out
+    }
+
     /// Sends one job now. Never throws: the outcome is written to the job
     /// (status, lastError) and the attempt log, and the updated job returned.
     @discardableResult
     public func send(jobID: UUID) async -> PostJob? {
         guard var job = try? store.job(id: jobID) else { return nil }
-        if running.contains(jobID) { return job }
+        if running.contains(jobID) || job.status == .cancelled { return job }
         running.insert(jobID)
-        defer { running.remove(jobID); onChange?() }
+        defer {
+            running.remove(jobID)
+            onChange?()
+            if let done = try? store.job(id: jobID) { onFinished?(done) }
+        }
 
         let attemptID = try? store.beginAttempt(jobID: jobID)
         func fail(_ error: Error) -> PostJob {
@@ -116,8 +173,11 @@ public final class PostingService {
             guard let account = try store.accounts().first(where: { $0.id == job.accountID }) else { throw PostingError.notFound }
             guard account.status == .connected else { throw PostingError.accountNotConnected(account.username) }
             guard let exportPath = variation.exportPath, !variation.needsExport else { throw PostingError.notExported }
-            let fileURL = store.url(forRelative: exportPath)
+            var fileURL = store.url(forRelative: exportPath)
             guard FileManager.default.fileExists(atPath: fileURL.path) else { throw PostingError.exportMissing }
+            if let overlay = job.overlay, !overlay.isEmpty {
+                fileURL = try await renderWithOverlay(job: job, variation: variation, overlay: overlay)
+            }
 
             let wait = await limiter.waitTime(for: account)
             if wait > maxInlineWait {

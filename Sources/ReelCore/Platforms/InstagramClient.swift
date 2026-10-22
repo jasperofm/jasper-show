@@ -66,6 +66,30 @@ public struct InstagramClient: PlatformClient {
         return RemoteProfile(remoteID: id, username: j.string("username") ?? id)
     }
 
+    public func fetchMetrics(remotePostID: String, account: Account, tokens: OAuthTokens) async throws -> PostMetrics {
+        let token = tokens.accessToken
+        let basicURL = graph.appendingPathComponent(remotePostID)
+            .with(query: ["fields": "like_count,comments_count", "access_token": token])
+        let basic = try await http.json(.make(basicURL))
+        var m = PostMetrics(likes: basic.int("like_count"), comments: basic.int("comments_count"))
+
+        // Insights are best-effort: metric names change between Graph versions.
+        let insightsURL = graph.appendingPathComponent("\(remotePostID)/insights")
+            .with(query: ["metric": "reach,views,shares", "access_token": token])
+        if let ins = try? await http.json(.make(insightsURL)), let data = ins["data"] as? [[String: Any]] {
+            for metric in data {
+                let value = (metric["values"] as? [[String: Any]])?.first?.int("value")
+                switch metric.string("name") {
+                case "reach": m.reach = value
+                case "views": m.views = value
+                case "shares": m.shares = value
+                default: break
+                }
+            }
+        }
+        return m
+    }
+
     public func publish(_ req: PublishRequest, tokens: OAuthTokens,
                         progress: @escaping @Sendable (PublishStage) -> Void) async throws -> PublishResult {
         guard let igID = req.account.remoteID else { throw PlatformError(platform: platform, message: "Account has no Instagram user id") }

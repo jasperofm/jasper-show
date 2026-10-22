@@ -64,12 +64,13 @@ public struct VariationRevision: Identifiable, Equatable, Sendable {
 }
 
 public enum Platform: String, Codable, CaseIterable, Identifiable, Sendable {
-    case instagram, tiktok, youtube
+    case instagram, facebook, tiktok, youtube
     public var id: String { rawValue }
 
     public var displayName: String {
         switch self {
         case .instagram: return "Instagram"
+        case .facebook: return "Facebook"
         case .tiktok: return "TikTok"
         case .youtube: return "YouTube"
         }
@@ -79,6 +80,7 @@ public enum Platform: String, Codable, CaseIterable, Identifiable, Sendable {
     public var symbolName: String {
         switch self {
         case .instagram: return "camera.circle"
+        case .facebook: return "f.square"
         case .tiktok: return "music.note"
         case .youtube: return "play.rectangle"
         }
@@ -111,6 +113,11 @@ public struct Account: Identifiable, Hashable, Sendable {
     }
 
     public var keychainKey: String { "account.\(id.uuidString)" }
+
+    /// "@name" for social handles, plain name for Facebook Pages and channels.
+    public var handle: String {
+        platform == .instagram || platform == .tiktok ? "@\(username)" : username
+    }
 }
 
 public enum PostStatus: String, Codable, CaseIterable, Sendable {
@@ -138,6 +145,9 @@ public struct PostJob: Identifiable, Hashable, Sendable {
     /// YouTube title (other platforms ignore it). Empty = variation name.
     public var title: String
     public var privacy: PostPrivacy
+    /// On-screen text for this account's copy. When set, the video is
+    /// rendered again with this text before upload.
+    public var overlay: TextOverlay?
     public var status: PostStatus
     /// Phase 2 scheduler: earliest time the job may run. Nil = run on demand.
     public var scheduledAt: Date?
@@ -154,16 +164,40 @@ public struct PostJob: Identifiable, Hashable, Sendable {
     public var postedAt: Date?
 
     public init(id: UUID = UUID(), variationID: UUID, accountID: UUID, caption: String = "",
-                title: String = "", privacy: PostPrivacy = .publicAudience, status: PostStatus = .pending, scheduledAt: Date? = nil, nextAttemptAt: Date? = nil,
+                title: String = "", privacy: PostPrivacy = .publicAudience, overlay: TextOverlay? = nil,
+                status: PostStatus = .pending, scheduledAt: Date? = nil, nextAttemptAt: Date? = nil,
                 attemptCount: Int = 0, remotePostID: String? = nil, remoteURL: String? = nil,
                 lastError: String? = nil, batchID: UUID? = nil, createdAt: Date = Date(),
                 updatedAt: Date = Date(), postedAt: Date? = nil) {
         self.id = id; self.variationID = variationID; self.accountID = accountID
-        self.caption = caption; self.title = title; self.privacy = privacy; self.status = status; self.scheduledAt = scheduledAt
+        self.caption = caption; self.title = title; self.privacy = privacy; self.overlay = overlay; self.status = status; self.scheduledAt = scheduledAt
         self.nextAttemptAt = nextAttemptAt; self.attemptCount = attemptCount
         self.remotePostID = remotePostID; self.remoteURL = remoteURL; self.lastError = lastError
         self.batchID = batchID; self.createdAt = createdAt; self.updatedAt = updatedAt; self.postedAt = postedAt
     }
+}
+
+/// Latest engagement numbers for a posted job, read from the platform's API.
+/// Nil means the platform doesn't report that number (or not to this app).
+public struct PostStats: Identifiable, Equatable, Sendable {
+    public var id: UUID { jobID }
+    public var jobID: UUID
+    public var views: Int?
+    public var likes: Int?
+    public var comments: Int?
+    public var shares: Int?
+    public var reach: Int?
+    public var fetchedAt: Date
+    public var error: String?
+
+    public init(jobID: UUID, views: Int? = nil, likes: Int? = nil, comments: Int? = nil, shares: Int? = nil,
+                reach: Int? = nil, fetchedAt: Date = Date(), error: String? = nil) {
+        self.jobID = jobID; self.views = views; self.likes = likes; self.comments = comments
+        self.shares = shares; self.reach = reach; self.fetchedAt = fetchedAt; self.error = error
+    }
+
+    /// Likes + comments + shares, the simple engagement total shown in the dashboard.
+    public var engagement: Int { (likes ?? 0) + (comments ?? 0) + (shares ?? 0) }
 }
 
 /// Append-only log of every attempt, success or failure.

@@ -3,88 +3,115 @@ import ReelCore
 
 struct ContentView: View {
     @EnvironmentObject var app: AppState
+    @AppStorage("didFinishOnboarding") private var didFinishOnboarding = false
 
     var body: some View {
         NavigationSplitView {
-            AccountSidebar()
-                .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)
+            Sidebar()
+                .navigationSplitViewColumnWidth(min: 230, ideal: 260, max: 320)
         } detail: {
-            VSplitView {
-                HSplitView {
-                    LibraryView()
-                        .frame(minWidth: 280, idealWidth: 340)
-                    Group {
-                        if let editor = app.editor {
-                            EditorView(editor: editor, preview: editor.preview)
-                                .id(editor.variation.id)
-                        } else {
-                            EmptyEditorView()
-                        }
-                    }
-                    .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity)
-                }
-                .frame(minHeight: 420)
-                PostingTrackerView()
-                    .frame(minHeight: 150, idealHeight: 210)
-            }
+            detail
         }
         .toolbar {
             ToolbarItemGroup {
                 Button { app.presentImportPanel() } label: { Label("Import", systemImage: "square.and.arrow.down") }
+                    .help("Import videos (⌘I)")
                 Button { app.showComparison = true } label: { Label("Compare", systemImage: "rectangle.split.3x1") }
                     .disabled(app.selectedAssetID == nil || app.variations(of: app.selectedAssetID!).isEmpty)
-                Button { Task { await app.syncAccounts() } } label: { Label("Sync Accounts", systemImage: "arrow.triangle.2.circlepath") }
+                    .help("Compare variations side by side")
+                Button { Task { await app.syncAccounts() } } label: { Label("Sync", systemImage: "arrow.triangle.2.circlepath") }
+                    .help("Check every account's connection")
+                Button { app.openCompose() } label: { Label("Compose", systemImage: "square.and.pencil") }
+                    .help("Post or schedule to your accounts")
             }
         }
         .sheet(isPresented: $app.showComparison) {
-            if let asset = app.selectedAsset {
-                ComparisonView(asset: asset)
+            if let asset = app.selectedAsset { ComparisonView(asset: asset) }
+        }
+        .sheet(item: $app.compose) { req in ComposeView(request: req) }
+        .sheet(isPresented: $app.showAddAccount) { AddAccountSheet() }
+        .sheet(item: $app.wizardPlatform) { p in SetupWizard(platform: p) }
+        .sheet(isPresented: $app.showScheduleAll) { ScheduleAllSheet() }
+        .sheet(isPresented: $app.showHelp) { HelpView() }
+        .sheet(isPresented: Binding(get: { !didFinishOnboarding }, set: { if !$0 { didFinishOnboarding = true } })) {
+            OnboardingView { didFinishOnboarding = true }
+        }
+        .alert(item: $app.alert) { a in Alert(title: Text(a.title), message: Text(a.message)) }
+        .overlay(alignment: .bottom) {
+            if let p = app.connecting {
+                HStack(spacing: 10) {
+                    ProgressView().controlSize(.small)
+                    Text("Finish signing in to \(p.displayName) in the window that opened…")
+                }
+                .padding(.horizontal, 16).padding(.vertical, 10)
+                .background(.regularMaterial, in: Capsule())
+                .padding(.bottom, 20)
             }
         }
-        .sheet(item: $app.postSheetVariation) { v in
-            PostSheet(variation: v)
-        }
-        .sheet(isPresented: $app.showHelp) { HelpView() }
-        .alert(item: $app.alert) { a in
-            Alert(title: Text(a.title), message: Text(a.message))
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        switch app.section {
+        case .dashboard: DashboardView()
+        case .library: LibraryWorkspace()
+        case .schedule: ScheduleView()
+        case .analytics: AnalyticsView()
+        case .account(let id):
+            if let a = app.account(id: id) { AccountDetailView(account: a) } else { DashboardView() }
         }
     }
 }
 
-struct EmptyEditorView: View {
+
+/// Library grid + editor, with the posting tracker underneath.
+struct LibraryWorkspace: View {
     @EnvironmentObject var app: AppState
+
     var body: some View {
-        VStack(spacing: 12) {
-            Image(systemName: "film.stack").font(.system(size: 44)).foregroundStyle(.secondary)
-            if app.selectedAsset == nil {
-                Text("Import a video, then select it to start making variations.")
-            } else {
-                Text("Select a variation, or create one.")
-                Button("New Variation") { app.newVariation() }
+        VSplitView {
+            HSplitView {
+                LibraryView()
+                    .frame(minWidth: 280, idealWidth: 340)
+                Group {
+                    if let editor = app.editor {
+                        EditorView(editor: editor, preview: editor.preview)
+                            .id(editor.variation.id)
+                    } else if app.selectedAsset == nil {
+                        EmptyState(icon: "film.stack", title: "Pick a video",
+                                   message: "Import a video, then select it to start making variations.",
+                                   actionTitle: "Import Videos") { app.presentImportPanel() }
+                    } else {
+                        EmptyState(icon: "wand.and.stars", title: "Make a variation",
+                                   message: "Variations are edited versions of this video: crop, lighting, cuts, speed and on-screen text.",
+                                   actionTitle: "New Variation") { app.newVariation() }
+                    }
+                }
+                .frame(minWidth: 620, maxWidth: .infinity, maxHeight: .infinity)
             }
+            .frame(minHeight: 420)
+            PostingTrackerView(compact: true)
+                .frame(minHeight: 150, idealHeight: 200)
         }
-        .foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
 struct HelpView: View {
     @Environment(\.dismiss) var dismiss
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Reel Manager").font(.title2.bold())
+        VStack(alignment: .leading, spacing: 12) {
+            Text("How Reel Manager works").font(.title2.bold())
             Group {
-                Text("1. Import videos with ⌘I or by dropping files onto the library.")
-                Text("2. Select a video and create variations (⌘N). Edits save automatically; ⌘Z / ⇧⌘Z undo and redo.")
-                Text("3. Use the crop tool in the preview to draw a frame. Add cuts at the playhead in the Timing section.")
-                Text("4. Export the variation with a quality preset, then click Post to assign it to accounts.")
-                Text("5. The tracker at the bottom shows every post. Failed posts stay there for retry, with a log of each attempt.")
-                Text("Accounts connect through each platform's official sign-in. Add your developer app credentials in Settings first.")
-                    .foregroundStyle(.secondary)
+                Label("Import videos with ⌘I or by dropping files on the Library.", systemImage: "1.circle.fill")
+                Label("Select a video and make variations (⌘N). Edits save automatically; ⌘Z undoes.", systemImage: "2.circle.fill")
+                Label("Export a variation, then click Compose to pick accounts, captions and on-screen text.", systemImage: "3.circle.fill")
+                Label("Post now, schedule it, or spread posts out. Failed posts retry after 1, 5 and 15 minutes.", systemImage: "4.circle.fill")
+                Label("Keep the app open for scheduled posts. It keeps your Mac awake while posts are waiting.", systemImage: "5.circle.fill")
             }
+            .font(.callout)
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }
         .padding(24)
-        .frame(width: 520)
+        .frame(width: 540)
     }
 }

@@ -36,7 +36,28 @@ public struct PublishResult: Sendable {
     public var url: String?
 }
 
+/// Engagement numbers as a platform reports them. Nil = not reported.
+public struct PostMetrics: Sendable, Equatable {
+    public var views: Int?
+    public var likes: Int?
+    public var comments: Int?
+    public var shares: Int?
+    public var reach: Int?
+    public init(views: Int? = nil, likes: Int? = nil, comments: Int? = nil, shares: Int? = nil, reach: Int? = nil) {
+        self.views = views; self.likes = likes; self.comments = comments; self.shares = shares; self.reach = reach
+    }
+}
+
+/// One account a sign-in gives access to. Usually one; a Facebook login
+/// can manage several Pages, each with its own token.
+public struct ConnectableAccount: Sendable {
+    public var profile: RemoteProfile
+    public var tokens: OAuthTokens
+}
+
 public enum PublishStage: Sendable {
+    /// Burning this account's on-screen text into its copy of the video.
+    case rendering(Double)
     case uploading(Double)
     case processing
 }
@@ -49,14 +70,25 @@ public protocol PlatformClient: Sendable {
     func exchange(code: String, pkce: PKCE, config: PlatformAppConfig) async throws -> OAuthTokens
     func refresh(_ tokens: OAuthTokens, config: PlatformAppConfig) async throws -> OAuthTokens
     func fetchProfile(tokens: OAuthTokens) async throws -> RemoteProfile
+    /// Accounts this sign-in can post to. Default: the signed-in profile.
+    func connectableAccounts(tokens: OAuthTokens) async throws -> [ConnectableAccount]
     func publish(_ request: PublishRequest, tokens: OAuthTokens,
                  progress: @escaping @Sendable (PublishStage) -> Void) async throws -> PublishResult
+    /// Reads engagement for a post this app published.
+    func fetchMetrics(remotePostID: String, account: Account, tokens: OAuthTokens) async throws -> PostMetrics
+}
+
+extension PlatformClient {
+    public func connectableAccounts(tokens: OAuthTokens) async throws -> [ConnectableAccount] {
+        [ConnectableAccount(profile: try await fetchProfile(tokens: tokens), tokens: tokens)]
+    }
 }
 
 public enum PlatformClients {
     public static func client(for p: Platform, session: URLSession = .shared) -> PlatformClient {
         switch p {
         case .instagram: return InstagramClient(session: session)
+        case .facebook: return FacebookClient(session: session)
         case .tiktok: return TikTokClient(session: session)
         case .youtube: return YouTubeClient(session: session)
         }
@@ -71,6 +103,11 @@ extension Dictionary where Key == String, Value == Any {
     }
     func dict(_ k: String) -> [String: Any]? { self[k] as? [String: Any] }
     func double(_ k: String) -> Double? { (self[k] as? NSNumber)?.doubleValue }
+    func int(_ k: String) -> Int? {
+        if let n = self[k] as? NSNumber { return n.intValue }
+        if let s = self[k] as? String { return Int(s) }
+        return nil
+    }
 }
 
 func tokens(fromJSON j: [String: Any], keepingRefresh old: String? = nil) -> OAuthTokens? {

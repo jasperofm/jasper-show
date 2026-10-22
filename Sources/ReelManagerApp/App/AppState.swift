@@ -10,6 +10,9 @@ final class AppState: ObservableObject {
     let importer: MediaImporter
     let accountService: AccountService
     let posting: PostingService
+    let scheduler: PostScheduler
+    let analytics: AnalyticsService
+    let notifier = Notifier()
     let configs = PlatformConfigStore()
 
     @Published private(set) var assets: [SourceAsset] = []
@@ -17,6 +20,9 @@ final class AppState: ObservableObject {
     @Published private(set) var accounts: [Account] = []
     @Published private(set) var jobs: [PostJob] = []
     @Published var uploadProgress: [UUID: PublishStage] = [:]
+    @Published private(set) var stats: [UUID: PostStats] = [:]
+    @Published private(set) var nextScheduledRun: Date?
+    @Published private(set) var isSyncingStats = false
 
     @Published var selectedAssetID: UUID? { didSet { if oldValue != selectedAssetID { selectedVariationID = nil } } }
     @Published var selectedVariationID: UUID? { didSet { if oldValue != selectedVariationID { openEditor() } } }
@@ -27,8 +33,25 @@ final class AppState: ObservableObject {
     @Published var isImporting = false
     @Published var showComparison = false
     @Published var showHelp = false
-    @Published var postSheetVariation: Variation?
+    @Published var section: SidebarSection = .dashboard
+    @Published var compose: ComposeRequest?
+    @Published var wizardPlatform: Platform?
+    @Published var showAddAccount = false
+    @Published var showScheduleAll = false
+    @Published var connecting: Platform?
     @Published var alert: AppAlert?
+
+    enum SidebarSection: Hashable {
+        case dashboard, library, schedule, analytics
+        case account(UUID)
+    }
+
+    /// Opens the Compose window, optionally with a video and accounts chosen.
+    struct ComposeRequest: Identifiable {
+        let id = UUID()
+        var variationID: UUID?
+        var accountIDs: Set<UUID> = []
+    }
 
     enum LibrarySort: String, CaseIterable, Identifiable {
         case newest = "Newest", oldest = "Oldest", title = "Title", assigned = "Most assigned"
@@ -52,8 +75,17 @@ final class AppState: ObservableObject {
         posting = PostingService(store: store, accounts: accountService)
         posting.onChange = { [weak self] in self?.reloadJobs(); self?.reloadAccounts() }
         posting.onProgress = { [weak self] id, stage in self?.uploadProgress[id] = stage }
+        scheduler = PostScheduler(store: store, posting: posting)
+        analytics = AnalyticsService(store: store, accounts: accountService)
+        posting.onFinished = { [weak self] job in self?.postFinished(job) }
+        scheduler.onStateChange = { [weak self] in self?.nextScheduledRun = self?.scheduler.nextWake }
 
+        // A quit mid-upload leaves jobs "uploading"; put them back in the queue.
+        try? store.resetInterruptedJobs()
         reloadAll()
+        stats = (try? store.stats()) ?? [:]
+        notifier.requestPermission()
+        scheduler.start()
         // Auto-backup on launch, then trim history to 30 days.
         Task.detached(priority: .background) { [store] in
             _ = try? store.backupDatabase()
@@ -192,13 +224,23 @@ final class AppState: ObservableObject {
 
     // MARK: Accounts
 
+    /// Opens the sign-in window, or the setup wizard if this platform's
+    /// developer app isn't set up yet.
     func connect(_ platform: Platform, reconnecting existing: Account? = nil) {
+        guard accountService.isConfigured(platform) else {
+            wizardPlatform = platform
+            return
+        }
+        connecting = platform
         Task {
             do {
-                _ = try await accountService.connect(platform, existing: existing)
+                let added = try await accountService.connect(platform, existing: existing)
+                reloadAccounts()
+                if let first = added.first { section = .account(first.id) }
             } catch {
                 report(error, title: "Couldn't connect \(platform.displayName)")
             }
+            connecting = nil
             reloadAccounts()
         }
     }
@@ -206,6 +248,7 @@ final class AppState: ObservableObject {
     func disconnect(_ a: Account, remove: Bool) {
         do { try accountService.disconnect(a, remove: remove) } catch { report(error) }
         if remove && selectedAccountFilter == a.id { selectedAccountFilter = nil }
+        if remove && section == .account(a.id) { section = .dashboard }
         reloadAll()
     }
 
@@ -226,20 +269,101 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// One entry per account from the Compose box.
+    struct ComposeEntry {
+        let account: Account
+        let caption: String
+        let overlay: TextOverlay?
+    }
+
+    /// Creates (or updates) one job per account, each with its own caption and text.
+    func composeJobs(_ v: Variation, entries: [ComposeEntry], title: String, privacy: PostPrivacy) -> [PostJob] {
+        var out: [PostJob] = []
+        do {
+            for e in entries {
+                out += try posting.assign(variation: v, to: [e.account], caption: e.caption, title: title,
+                                          privacy: privacy, overlay: e.overlay)
+            }
+        } catch {
+            report(error)
+        }
+        return out
+    }
+
     /// Manual "Post now". Jobs run one after another so per-account rate
     /// limits and upload bandwidth aren't hammered.
     func post(_ jobs: [PostJob]) {
         Task {
-            for j in jobs {
-                let result = await posting.send(jobID: j.id)
-                uploadProgress[j.id] = nil
-                if let r = result, r.status == .failed {
-                    let name = account(id: r.accountID)?.username ?? "account"
-                    alert = AppAlert(title: "Post to \(name) failed",
-                                     message: (r.lastError ?? "Unknown error") + "\n\nIt stays in the tracker so you can retry.")
-                }
-            }
+            for j in jobs { await posting.send(jobID: j.id) }
         }
+    }
+
+    /// Runs after every attempt (manual, scheduled or retry): clears the
+    /// progress bar and tells the user how it went.
+    private func postFinished(_ job: PostJob) {
+        uploadProgress[job.id] = nil
+        let name = account(id: job.accountID).map { "\($0.platform.displayName) @\($0.username)" } ?? "account"
+        let video = variation(id: job.variationID)?.name ?? "Video"
+        switch job.status {
+        case .posted:
+            notifier.send(title: "Posted to \(name)", body: "\(video) is live.")
+        case .failed:
+            let reason = job.lastError ?? "Unknown error"
+            if let next = job.nextAttemptAt {
+                notifier.send(title: "Post to \(name) failed",
+                              body: "\(reason)\nRetrying at \(next.formatted(date: .omitted, time: .shortened)).")
+            } else {
+                notifier.send(title: "Post to \(name) failed", body: "\(reason)\nIt's waiting in the tracker for you to retry.")
+                alert = AppAlert(title: "Post to \(name) failed",
+                                 message: reason + "\n\nAutomatic retries are used up. It stays in the tracker so you can retry.")
+            }
+        default:
+            break
+        }
+        nextScheduledRun = try? store.nextWakeDate()
+    }
+
+    /// Schedules jobs one after another: the first at `start`, then every `interval` seconds.
+    func schedule(_ jobs: [PostJob], start: Date, interval: TimeInterval) {
+        let dates = StaggerPlanner.dates(count: jobs.count, start: start, interval: interval)
+        do { try posting.schedule(jobs, at: dates) } catch { report(error) }
+        nextScheduledRun = try? store.nextWakeDate()
+        Task { await scheduler.tick(now: Date()) }
+    }
+
+    func unschedule(_ job: PostJob) {
+        do { try posting.unschedule(job) } catch { report(error) }
+        nextScheduledRun = try? store.nextWakeDate()
+    }
+
+    /// Pending jobs whose variation is exported, oldest first: the queue for "Schedule All".
+    var schedulableJobs: [PostJob] {
+        jobs.filter { j in
+            j.status == .pending && !(variation(id: j.variationID)?.needsExport ?? true)
+        }
+        .sorted { $0.createdAt < $1.createdAt }
+    }
+
+    func openCompose(_ v: Variation? = nil, accounts preselected: Set<UUID> = []) {
+        compose = ComposeRequest(variationID: v?.id, accountIDs: preselected)
+    }
+
+    /// Variations that are exported and ready to post, newest first.
+    var postableVariations: [Variation] {
+        variations.filter { !$0.needsExport }.sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    func jobs(for account: Account) -> [PostJob] {
+        jobs.filter { $0.accountID == account.id && $0.status != .cancelled }
+    }
+
+    // MARK: Analytics
+
+    func syncStats() async {
+        isSyncingStats = true
+        await analytics.syncAll()
+        stats = (try? store.stats()) ?? [:]
+        isSyncingStats = false
     }
 
     func cancel(_ job: PostJob) {

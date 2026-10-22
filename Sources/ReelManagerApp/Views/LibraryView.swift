@@ -13,6 +13,13 @@ struct LibraryView: View {
                 Text("Library").font(.headline)
                 if app.isImporting { ProgressView().controlSize(.small) }
                 Spacer()
+                Picker("Account", selection: $app.selectedAccountFilter) {
+                    Text("All accounts").tag(UUID?.none)
+                    ForEach(app.accounts) { Text($0.handle).tag(UUID?.some($0.id)) }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .help("Show only videos assigned to an account")
                 Picker("Sort", selection: $app.librarySort) {
                     ForEach(AppState.LibrarySort.allCases) { Text($0.rawValue).tag($0) }
                 }
@@ -112,9 +119,11 @@ struct VariationList: View {
             ForEach(app.variations(of: asset.id)) { v in
                 VariationRow(variation: v, selected: app.selectedVariationID == v.id)
                     .onTapGesture { app.selectedVariationID = v.id }
+                    // Drag onto an account in the sidebar to post it there.
+                    .draggable(v.id.uuidString)
                     .contextMenu {
                         Button("Duplicate") { app.newVariation(from: v) }
-                        Button("Post…") { app.postSheetVariation = v }
+                        Button("Compose Post…") { app.openCompose(v) }.disabled(v.needsExport)
                         Divider()
                         Button("Delete", role: .destructive) { app.deleteVariation(v) }
                     }
