@@ -160,14 +160,20 @@ struct StatTile: View {
 struct CopyField: View {
     let label: String
     let value: String
+    /// Shown instead of the value while it's empty.
+    var placeholder: String = ""
     @State private var copied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label).font(.caption).foregroundStyle(.secondary)
             HStack {
-                Text(value).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
-                    .lineLimit(2).truncationMode(.middle)
+                if value.isEmpty {
+                    Text(placeholder).font(.callout).foregroundStyle(.secondary)
+                } else {
+                    Text(value).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                        .lineLimit(2).truncationMode(.middle)
+                }
                 Spacer()
                 Button {
                     NSPasteboard.general.clearContents()
@@ -178,6 +184,7 @@ struct CopyField: View {
                     Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
                 .controlSize(.small)
+                .disabled(value.isEmpty)
             }
             .padding(8)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))

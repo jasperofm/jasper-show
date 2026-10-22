@@ -26,6 +26,10 @@ final class AppState: ObservableObject {
     @Published private(set) var rules = PublishRules()
     @Published private(set) var isPublisher = false
     @Published var showActivity = false
+    @Published private(set) var slotSchedule = SlotSchedule()
+    @Published var showSlots = false
+    /// Posts to place with "Fill Slots"; nil = sheet closed.
+    @Published var fillSlotsJobs: [UUID]?
     let background = BackgroundPublisher()
 
     @Published var selectedAssetID: UUID? { didSet { if oldValue != selectedAssetID { selectedVariationID = nil } } }
@@ -46,7 +50,7 @@ final class AppState: ObservableObject {
     @Published var alert: AppAlert?
 
     enum SidebarSection: Hashable {
-        case dashboard, library, schedule, analytics
+        case dashboard, library, calendar, schedule, analytics
         case account(UUID)
     }
 
@@ -90,6 +94,7 @@ final class AppState: ObservableObject {
         // Interrupted uploads are reset by the scheduler once it holds the
         // publisher lock, so a running background publisher isn't disturbed.
         rules = PublishRules.load(from: store)
+        slotSchedule = SlotSchedule.load(from: store)
         reloadAll()
         stats = (try? store.stats()) ?? [:]
         notifier.requestPermission()
@@ -178,6 +183,59 @@ final class AppState: ObservableObject {
 
     func startOver(_ job: PostJob) {
         do { try posting.startOver(job) } catch { report(error) }
+    }
+
+    // MARK: Calendar and slots
+
+    func saveSlots(_ s: SlotSchedule) {
+        do {
+            try s.save(to: store)
+            slotSchedule = s
+        } catch { report(error) }
+    }
+
+    /// Moves a post to a new time. Only approved posts can be on the calendar.
+    func reschedule(_ job: PostJob, to date: Date) {
+        guard job.isApproved, !job.status.isTerminal, !job.status.isActive else { return }
+        guard date > Date() else {
+            alert = AppAlert(title: "That time has passed", message: "Pick a time in the future.")
+            return
+        }
+        do { try posting.schedule([job], at: [date]) } catch { report(error) }
+        nextScheduledRun = try? store.nextWakeDate()
+    }
+
+    /// Preview for "Fill Slots": where each post would go.
+    func planSlots(for jobIDs: [UUID], from: Date = Date()) -> [SlotPlanner.Planned] {
+        let list = jobIDs.compactMap { id in jobs.first { $0.id == id } }
+        return SlotPlanner.plan(list, existing: jobs, accounts: accounts, schedule: slotSchedule, rules: rules, from: from)
+    }
+
+    /// Schedules the planned posts exactly as previewed.
+    func apply(_ plan: [SlotPlanner.Planned]) {
+        let placed = plan.compactMap { p in p.date.flatMap { d in jobs.first { $0.id == p.jobID }.map { ($0, d) } } }
+        guard !placed.isEmpty else { return }
+        do { try posting.schedule(placed.map(\.0), at: placed.map(\.1)) } catch { report(error) }
+        nextScheduledRun = try? store.nextWakeDate()
+        Task { await scheduler.tick(now: Date()) }
+    }
+
+    /// Approved posts that aren't on the calendar yet.
+    var unscheduledApproved: [PostJob] {
+        jobs.filter { $0.status == .pending && $0.isApproved }.sorted { $0.createdAt < $1.createdAt }
+    }
+
+    func exportSchedule(asICS: Bool) {
+        let rows = jobs.filter { $0.calendarDate != nil }.map { j in
+            ScheduleExport.Row(job: j, accountName: account(id: j.accountID)?.handle ?? "",
+                               platform: account(id: j.accountID)?.platform.displayName ?? "",
+                               videoName: variation(id: j.variationID)?.name ?? "")
+        }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = asICS ? "Reel Manager schedule.ics" : "Reel Manager schedule.csv"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let text = asICS ? ScheduleExport.ics(rows) : ScheduleExport.csv(rows)
+        do { try text.write(to: url, atomically: true, encoding: .utf8) } catch { report(error) }
     }
 
     /// Drafts waiting for approval.

@@ -10,6 +10,7 @@ struct Sidebar: View {
             Section {
                 row("Dashboard", "square.grid.2x2", .dashboard)
                 row("Library", "film.stack", .library)
+                row("Calendar", "calendar", .calendar)
                 row("Schedule", "calendar.badge.clock", .schedule, badge: scheduledCount)
                 row("Analytics", "chart.bar.xaxis", .analytics)
             } header: {

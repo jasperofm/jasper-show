@@ -34,6 +34,10 @@ struct ContentView: View {
         .sheet(isPresented: $app.showScheduleAll) { ScheduleAllSheet() }
         .sheet(isPresented: $app.showHelp) { HelpView() }
         .sheet(isPresented: $app.showActivity) { ActivityLogSheet() }
+        .sheet(isPresented: $app.showSlots) { SlotsSheet() }
+        .sheet(isPresented: Binding(get: { app.fillSlotsJobs != nil }, set: { if !$0 { app.fillSlotsJobs = nil } })) {
+            FillSlotsSheet(jobIDs: app.fillSlotsJobs ?? [])
+        }
         .sheet(isPresented: Binding(get: { !didFinishOnboarding }, set: { if !$0 { didFinishOnboarding = true } })) {
             OnboardingView { didFinishOnboarding = true }
         }
@@ -56,6 +60,7 @@ struct ContentView: View {
         switch app.section {
         case .dashboard: DashboardView()
         case .library: LibraryWorkspace()
+        case .calendar: CalendarView()
         case .schedule: ScheduleView()
         case .analytics: AnalyticsView()
         case .account(let id):

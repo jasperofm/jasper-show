@@ -35,15 +35,28 @@ struct PostingTrackerView: View {
     var compact: Bool
     @State private var filter: Filter = .all
     @State private var logJob: PostJob?
+    @State private var search = ""
+    @State private var accountFilter: UUID?
+    @State private var platformFilter: Platform?
+    @State private var selection: Set<UUID> = []
 
     enum Filter: String, CaseIterable, Identifiable {
-        case all = "All", drafts = "Drafts", queued = "Queued", scheduled = "Scheduled", failed = "Failed", posted = "Posted"
+        case all = "All", drafts = "Drafts", queued = "Queued", scheduled = "Scheduled", overdue = "Overdue", failed = "Failed", posted = "Posted"
         var id: String { rawValue }
     }
 
     private var rows: [PostJob] {
-        app.jobs.filter { j in
+        let q = search.trimmingCharacters(in: .whitespaces).lowercased()
+        return app.jobs.filter { j in
+            if let accountFilter, j.accountID != accountFilter { return false }
+            if let platformFilter, app.account(id: j.accountID)?.platform != platformFilter { return false }
+            if !q.isEmpty {
+                let hay = [j.caption, j.title, app.variation(id: j.variationID)?.name ?? "", app.account(id: j.accountID)?.handle ?? "",
+                           j.overlay?.text ?? ""].joined(separator: " ").lowercased()
+                if !hay.contains(q) { return false }
+            }
             switch filter {
+            case .overdue: return j.isOverdue()
             case .all: return j.status != .cancelled
             case .drafts: return j.status == .pending && !j.isApproved
             case .queued: return (j.status == .pending && j.isApproved) || j.status.isActive
@@ -78,6 +91,32 @@ struct PostingTrackerView: View {
                     .disabled(failed.isEmpty)
             }
             .padding(.horizontal, compact ? 10 : 24).padding(.vertical, 8)
+            if !compact {
+                HStack {
+                    TextField("Search captions, videos, accounts", text: $search)
+                        .textFieldStyle(.roundedBorder).frame(maxWidth: 280)
+                    Picker("Platform", selection: $platformFilter) {
+                        Text("All platforms").tag(Platform?.none)
+                        ForEach(Platform.allCases) { Text($0.displayName).tag(Platform?.some($0)) }
+                    }
+                    .fixedSize()
+                    Picker("Account", selection: $accountFilter) {
+                        Text("All accounts").tag(UUID?.none)
+                        ForEach(app.accounts) { a in Text("\(a.platform.displayName) \(a.handle)").tag(UUID?.some(a.id)) }
+                    }
+                    .fixedSize()
+                    Spacer()
+                    let overdue = app.jobs.filter { $0.isOverdue() }.count
+                    if overdue > 0 {
+                        Button { filter = .overdue } label: {
+                            Label("\(overdue) overdue", systemImage: "exclamationmark.circle.fill").foregroundStyle(.red)
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                }
+                .padding(.horizontal, 24).padding(.bottom, 8)
+                if !selected.isEmpty { bulkBar }
+            }
             Divider()
 
             if rows.isEmpty {
@@ -85,7 +124,7 @@ struct PostingTrackerView: View {
                            message: "Posts you create in Compose appear here with their status.",
                            actionTitle: compact ? nil : "Compose", action: compact ? nil : { app.openCompose() })
             } else {
-                Table(rows) {
+                Table(rows, selection: $selection) {
                     TableColumn("Video") { j in
                         let v = app.variation(id: j.variationID)
                         HStack(spacing: 6) {
@@ -106,7 +145,11 @@ struct PostingTrackerView: View {
                     TableColumn("Status") { j in StatusCell(job: j, stage: app.uploadProgress[j.id]) }
                         .width(min: 130, ideal: 170)
                     TableColumn("When") { j in
-                        Text(whenText(j)).foregroundStyle(.secondary)
+                        if j.isOverdue() {
+                            Text("Overdue · " + whenText(j)).foregroundStyle(.red)
+                        } else {
+                            Text(whenText(j)).foregroundStyle(.secondary)
+                        }
                     }
                     .width(min: 120, ideal: 150)
                     TableColumn("Tries") { j in Text("\(j.attemptCount)").monospacedDigit() }
@@ -117,6 +160,33 @@ struct PostingTrackerView: View {
             }
         }
         .sheet(item: $logJob) { AttemptLogSheet(job: $0) }
+    }
+
+    private var selected: [PostJob] { app.jobs.filter { selection.contains($0.id) } }
+
+    /// Actions for every selected post at once.
+    private var bulkBar: some View {
+        let sel = selected
+        let drafts = sel.filter { $0.status == .pending && !$0.isApproved }
+        let approvedUnscheduled = sel.filter { $0.status == .pending && $0.isApproved }
+        let scheduled = sel.filter { [.scheduled, .held].contains($0.status) }
+        let failed = sel.filter { $0.status == .failed }
+        let cancellable = sel.filter { !$0.status.isTerminal && !$0.status.isActive }
+        return HStack(spacing: 8) {
+            Text("\(sel.count) selected").font(.callout.weight(.semibold))
+            if !drafts.isEmpty { Button("Approve \(drafts.count)") { app.approve(drafts) } }
+            if !approvedUnscheduled.isEmpty {
+                Button("Fill Slots (\(approvedUnscheduled.count))…") { app.fillSlotsJobs = approvedUnscheduled.map(\.id) }
+            }
+            if !scheduled.isEmpty { Button("Unschedule \(scheduled.count)") { scheduled.forEach { app.unschedule($0) } } }
+            if !failed.isEmpty { Button("Retry \(failed.count)") { app.post(failed) } }
+            if !cancellable.isEmpty { Button("Cancel \(cancellable.count)", role: .destructive) { cancellable.forEach { app.cancel($0) } } }
+            Spacer()
+            Button("Clear Selection") { selection = [] }.buttonStyle(.borderless)
+        }
+        .controlSize(.small)
+        .padding(.horizontal, 24).padding(.vertical, 6)
+        .background(Color.accentColor.opacity(0.08))
     }
 
     private func whenText(_ j: PostJob) -> String {

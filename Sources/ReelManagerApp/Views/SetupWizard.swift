@@ -13,6 +13,8 @@ struct SetupWizard: View {
     @State private var clientID = ""
     @State private var clientSecret = ""
     @State private var redirect = ""
+    /// Steps the user has ticked as done. Next stays off until the current one is.
+    @State private var done: Set<Int> = []
 
     private var guide: SetupGuide { SetupGuide.for(platform) }
     private var isLast: Bool { step == guide.steps.count }
@@ -52,11 +54,13 @@ struct SetupWizard: View {
                     Button("Save and Log In") { saveAndLogin() }
                         .buttonStyle(BrandButtonStyle())
                         .keyboardShortcut(.defaultAction)
-                        .disabled(clientID.isEmpty || (guide.needsSecret && clientSecret.isEmpty) || redirect.isEmpty)
+                        .disabled(idProblem != nil || (guide.needsSecret && clientSecret.isEmpty) || redirect.isEmpty)
                 } else {
                     Button("Next") { step += 1 }
                         .buttonStyle(BrandButtonStyle())
                         .keyboardShortcut(.defaultAction)
+                        .disabled(!done.contains(step))
+                        .help(done.contains(step) ? "" : "Tick \"I've done this step\" first")
                 }
             }
             .padding(16)
@@ -69,7 +73,9 @@ struct SetupWizard: View {
             redirect = c.redirectURI.isEmpty ? OAuthRedirects.suggested(for: platform, clientID: c.clientID) : c.redirectURI
         }
         .onChange(of: clientID) { id in
-            if platform == .youtube { redirect = OAuthRedirects.suggested(for: .youtube, clientID: id) }
+            if platform == .youtube {
+                redirect = OAuthRedirects.suggested(for: .youtube, clientID: id.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
         }
     }
 
@@ -94,20 +100,41 @@ struct SetupWizard: View {
                 CopyField(label: c.label, value: c.value == "{redirect}" ? redirect : c.value)
             }
             if let note = s.note {
-                Label(note, systemImage: "info.circle")
+                Label { Text(.init(note)) } icon: { Image(systemName: "info.circle") }
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            Divider().padding(.top, 4)
+            Toggle(isOn: Binding(get: { done.contains(step) },
+                                 set: { if $0 { done.insert(step) } else { done.remove(step) } })) {
+                Text("I've done this step").font(.callout.weight(.semibold))
+            }
+            .toggleStyle(.checkbox)
         }
+    }
+
+    /// Why the pasted ID can't be right yet, if it can't.
+    private var idProblem: String? {
+        let id = clientID.trimmingCharacters(in: .whitespacesAndNewlines)
+        if id.isEmpty { return "Paste the \(guide.idLabel.components(separatedBy: " (").first ?? "ID") first." }
+        if platform == .youtube && !id.hasSuffix(".apps.googleusercontent.com") {
+            return "That doesn't look like a Google Client ID. It ends in .apps.googleusercontent.com. Go back a step if you haven't created the client yet."
+        }
+        if id.contains(" ") { return "The ID shouldn't contain spaces." }
+        return nil
     }
 
     private var credentialsStep: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Paste your app's details").font(.title3.weight(.semibold))
-            Text(guide.credentialsHint).font(.callout).foregroundStyle(.secondary)
+            Text(.init(guide.credentialsHint)).font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 4) {
                 Text(guide.idLabel).font(.caption).foregroundStyle(.secondary)
                 TextField(guide.idLabel, text: $clientID).textFieldStyle(.roundedBorder)
+                if let p = idProblem, !clientID.isEmpty {
+                    Text(p).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+                }
             }
             if guide.needsSecret || platform == .youtube {
                 VStack(alignment: .leading, spacing: 4) {
@@ -115,10 +142,13 @@ struct SetupWizard: View {
                     SecureField(guide.secretLabel, text: $clientSecret).textFieldStyle(.roundedBorder)
                 }
             }
-            CopyField(label: "Redirect URI (already filled in; it must match what you entered on the website)", value: redirect)
+            CopyField(label: platform == .youtube ? "Redirect URI (made from your Client ID)"
+                                                  : "Redirect URI (already filled in; it must match what you entered on the website)",
+                      value: redirect,
+                      placeholder: "Fills in by itself once you paste the Client ID above.")
             Label("Your secret is stored in your Mac's Keychain, never in a file.", systemImage: "lock.shield")
                 .font(.caption).foregroundStyle(.secondary)
-            Label(guide.limits, systemImage: "exclamationmark.bubble")
+            Label { Text(.init(guide.limits)) } icon: { Image(systemName: "exclamationmark.bubble") }
                 .font(.caption).foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
         }
