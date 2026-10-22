@@ -2,6 +2,24 @@
 
 What's in Reel Manager, by milestone.
 
+## Milestone 3: editor upgrades (version 0.5.0)
+
+- **Looks:** Natural, Warm, Cool, Punchy, Faded, Mono and Cinematic. Each one only sets the color sliders, so you can keep adjusting afterwards.
+- **More color controls:** vignette and sharpen. You can also import a .cube LUT and set how strong it is. Hold "Before" to compare with the original colors.
+- **Audio:** volume, mute, and fade in and out. You hear the changes in the preview, and they're applied on export.
+- **Trim:** "Trim Start to Here" and "Trim End from Here", on top of cuts at any point.
+- **Cover:** set the cover to the current frame. It's sent to Instagram and TikTok, and to YouTube when your channel can set custom thumbnails.
+- **Safe-zone guides:** per platform, showing where each app's buttons and captions usually cover the video (approximate).
+- **File info:** shows the location and device info in your own file. It's removed on export by default (Settings or the editor toggle). This is for privacy only, not for avoiding detection.
+
+## Milestone 2: calendar and queue (version 0.4.0)
+
+- **Calendar:** month, week, day and list views. Drag a post to move it. The gap finder shows days with nothing planned, and overdue posts are highlighted.
+- **Posting slots:** set per account or for all accounts, with templates and a time zone. Slots stay at the same clock time when daylight saving changes.
+- **Fill Slots:** puts approved posts into free slots while keeping your daily limits, the gap between posts, posting hours and quiet hours. It shows an exact preview first. Drafts are never scheduled.
+- **Queue:** search, platform and account filters, multi-select bulk actions (approve, fill slots, unschedule, retry, cancel), and an overdue filter.
+- **Export:** your schedule as iCal (.ics) or CSV.
+
 ## Milestone 1: safe publishing (version 0.3.0)
 
 - **Approval first.** Every post is a draft until you approve it. "Approve & Post" and "Approve & Schedule" in Compose count as approval; "Save as Draft" doesn't. Only approved posts can be scheduled or published. Editing an approved post's caption, text or privacy sends it back to draft.
@@ -32,7 +50,5 @@ What's in Reel Manager, by milestone.
 
 ## Next
 
-- Milestone 2: calendar and queue.
-- Milestone 3: editor upgrades.
 - Milestone 4: analytics and reports.
 - Milestone 5: AI assistant (drafts only, always approved by you), security, accessibility.

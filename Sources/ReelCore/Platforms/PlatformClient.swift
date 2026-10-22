@@ -29,13 +29,16 @@ public struct PublishRequest: Sendable {
     public var resume: PublishCheckpoint?
     /// Clients call this before moving to the next step; the caller saves it.
     public var onCheckpoint: @Sendable (PublishCheckpoint) async -> Void
+    /// Cover frame, in milliseconds into the video. Nil = the platform picks.
+    public var coverTimeMs: Int?
 
     public init(videoURL: URL, caption: String, title: String, privacy: PostPrivacy, account: Account,
                 resume: PublishCheckpoint? = nil,
+                coverTimeMs: Int? = nil,
                 onCheckpoint: @escaping @Sendable (PublishCheckpoint) async -> Void = { _ in }) {
         self.videoURL = videoURL; self.caption = caption; self.title = title
         self.privacy = privacy; self.account = account
-        self.resume = resume; self.onCheckpoint = onCheckpoint
+        self.resume = resume; self.onCheckpoint = onCheckpoint; self.coverTimeMs = coverTimeMs
     }
 
     func checkpoint(_ step: PublishCheckpoint.Step, _ id: String) async {

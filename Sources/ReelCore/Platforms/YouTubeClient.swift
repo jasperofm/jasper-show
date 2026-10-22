@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 
 /// YouTube Data API v3. Uploads with the resumable protocol.
 /// Docs: https://developers.google.com/youtube/v3/guides/using_resumable_upload_protocol
@@ -114,7 +115,25 @@ public struct YouTubeClient: PlatformClient {
             throw PlatformError(platform: platform, message: "Upload session was not created")
         }
         await req.checkpoint(.created, uploadURL.absoluteString)
-        return try await upload(req, to: uploadURL, from: 0, size: size, tokens: tokens, progress: progress)
+        let result = try await upload(req, to: uploadURL, from: 0, size: size, tokens: tokens, progress: progress)
+        if let ms = req.coverTimeMs { await setThumbnail(videoID: result.remotePostID, from: req.videoURL, atMs: ms, tokens: tokens) }
+        return result
+    }
+
+    /// Custom thumbnails need a verified YouTube account; failures are ignored
+    /// and YouTube's automatic thumbnail stays.
+    private func setThumbnail(videoID: String, from file: URL, atMs ms: Int, tokens: OAuthTokens) async {
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("cover-\(videoID).jpg")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        guard (try? await Thumbnailer.writeThumbnail(for: AVURLAsset(url: file), at: Double(ms) / 1000, to: tmp,
+                                                     maxSize: CGSize(width: 1280, height: 1280))) != nil,
+              let jpeg = try? Data(contentsOf: tmp) else { return }
+        let url = URL(string: "https://www.googleapis.com/upload/youtube/v3/thumbnails/set")!.with(query: ["videoId": videoID])
+        var r = URLRequest(url: url)
+        r.httpMethod = "POST"
+        r.setValue("Bearer \(tokens.accessToken)", forHTTPHeaderField: "Authorization")
+        r.setValue("image/jpeg", forHTTPHeaderField: "Content-Type")
+        _ = try? await http.upload(r, data: jpeg)
     }
 
     private func upload(_ req: PublishRequest, to session: URL, from offset: Int, size: Int, tokens: OAuthTokens,

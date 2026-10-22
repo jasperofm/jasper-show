@@ -21,6 +21,8 @@ public enum RenderError: Error, LocalizedError {
 public struct RenderPlan {
     public let composition: AVComposition
     public let videoComposition: AVVideoComposition
+    /// Volume and fades; nil when the audio is untouched.
+    public let audioMix: AVAudioMix?
     public let renderSize: CGSize
 }
 
@@ -121,10 +123,49 @@ public enum VariationRenderer {
                 "inputTargetNeutral": CIVector(x: s.temperature, y: 0),
             ])
         }
+        if let lut = s.lutID {
+            img = LUTLibrary.shared.apply(lut, intensity: s.lutIntensity, to: img)
+        }
+        if s.sharpness > 0 {
+            img = img.applyingFilter("CISharpenLuminance", parameters: [kCIInputSharpnessKey: s.sharpness * 1.5])
+        }
+        if s.vignette > 0 {
+            let r = Double(max(renderSize.width, renderSize.height))
+            img = img.applyingFilter("CIVignetteEffect", parameters: [
+                kCIInputCenterKey: CIVector(x: renderSize.width / 2, y: renderSize.height / 2),
+                kCIInputRadiusKey: r * 0.75, kCIInputIntensityKey: s.vignette, "inputFalloff": 0.6,
+            ])
+        }
         if let overlay = s.overlay, !overlay.isEmpty {
             img = OverlayRenderer.shared.image(for: overlay, renderSize: renderSize).composited(over: img)
         }
         return img.cropped(to: CGRect(origin: .zero, size: renderSize))
+    }
+
+    /// Volume and fade ramps for the composition's audio. Nil when unchanged.
+    public static func makeAudioMix(for comp: AVComposition, settings s: EditSettings) -> AVAudioMix? {
+        let tracks = comp.tracks(withMediaType: .audio)
+        guard !tracks.isEmpty, s.volume != 1 || s.fadeIn > 0 || s.fadeOut > 0 else { return nil }
+        let total = comp.duration
+        let ts: CMTimeScale = 600
+        let mix = AVMutableAudioMix()
+        mix.inputParameters = tracks.map { track in
+            let p = AVMutableAudioMixInputParameters(track: track)
+            let v = Float(s.volume)
+            p.setVolume(v, at: .zero)
+            let fadeIn = min(s.fadeIn, total.seconds / 2)
+            let fadeOut = min(s.fadeOut, total.seconds / 2)
+            if fadeIn > 0 {
+                p.setVolumeRamp(fromStartVolume: 0, toEndVolume: v,
+                                timeRange: CMTimeRange(start: .zero, duration: CMTime(seconds: fadeIn, preferredTimescale: ts)))
+            }
+            if fadeOut > 0 {
+                let d = CMTime(seconds: fadeOut, preferredTimescale: ts)
+                p.setVolumeRamp(fromStartVolume: v, toEndVolume: 0, timeRange: CMTimeRange(start: total - d, duration: d))
+            }
+            return p
+        }
+        return mix
     }
 
     /// Display size of the source's video track after its preferred transform.
@@ -141,6 +182,7 @@ public enum VariationRenderer {
         let size = try await orientedSize(of: source)
         let comp = try await makeComposition(source: source, settings: settings)
         let vc = makeVideoComposition(for: comp, sourceSize: size, box: box ?? SettingsBox(settings), maxLongEdge: maxLongEdge)
-        return RenderPlan(composition: comp, videoComposition: vc, renderSize: vc.renderSize)
+        return RenderPlan(composition: comp, videoComposition: vc, audioMix: makeAudioMix(for: comp, settings: settings),
+                          renderSize: vc.renderSize)
     }
 }

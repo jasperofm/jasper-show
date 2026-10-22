@@ -5,8 +5,16 @@ import AVFoundation
 public final class VideoExporter {
     public init() {}
 
+    /// The user's choice in Settings (UserDefaults "export.stripMetadata", on unless turned off).
+    public static var stripMetadataDefault: Bool {
+        UserDefaults.standard.object(forKey: "export.stripMetadata") as? Bool ?? true
+    }
+
     /// - Parameter progress: called on an arbitrary queue with 0...1.
+    /// - Parameter stripPrivateMetadata: leave out location, device and other
+    ///   identifying metadata from the user's own file (privacy, on by default).
     public func export(sourceURL: URL, settings: EditSettings, preset: ExportPreset, to output: URL,
+                       stripPrivateMetadata: Bool = VideoExporter.stripMetadataDefault,
                        progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws {
         let source = AVURLAsset(url: sourceURL)
         let plan = try await VariationRenderer.plan(source: source, settings: settings, maxLongEdge: preset.maxLongEdge)
@@ -18,6 +26,11 @@ public final class VideoExporter {
         session.outputURL = output
         session.outputFileType = .mp4
         session.videoComposition = plan.videoComposition
+        session.audioMix = plan.audioMix
+        if stripPrivateMetadata {
+            session.metadata = []
+            session.metadataItemFilter = .forSharing()
+        }
         session.audioTimePitchAlgorithm = .spectral // keep pitch natural at non-1× speed
         session.shouldOptimizeForNetworkUse = true
 

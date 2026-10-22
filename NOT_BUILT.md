@@ -45,6 +45,10 @@ Please confirm them when you register your developer apps, and update
 | TikTok | Uploads go in chunks of 5 to 64 MB. | TikTokClient.chunkPlan | not verified |
 | YouTube | Until Google audits the project, uploads are locked to private. Each upload costs about 1,600 of the default 10,000 daily quota units. | YouTubeClient, Setup guide | not verified |
 | YouTube | In "Testing" mode, refresh tokens expire after 7 days, so the account needs to log in again weekly. | Setup guide | not verified |
+| Instagram | A Reel's cover frame is set with `thumb_offset` (milliseconds) when the container is created. | InstagramClient | not verified |
+| TikTok | The cover frame is set with `post_info.video_cover_timestamp_ms`. | TikTokClient | not verified |
+| YouTube | Custom thumbnails (`thumbnails.set`) only work on verified channels. The app tries, and keeps YouTube's own thumbnail if it fails. | YouTubeClient | not verified |
+| All | Safe-zone guides in the editor are approximate, measured from typical app layouts, not official numbers. | SafeZone | not verified |
 
 ## Waiting for your go-ahead
 

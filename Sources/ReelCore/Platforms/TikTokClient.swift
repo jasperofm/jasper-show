@@ -121,8 +121,10 @@ public struct TikTokClient: PlatformClient {
 
         let size = try FileManager.default.attributesOfItem(atPath: req.videoURL.path)[.size] as? Int ?? 0
         let plan = Self.chunkPlan(fileSize: size)
+        var postInfo: [String: Any] = ["title": String(req.caption.prefix(2200)), "privacy_level": wanted]
+        if let ms = req.coverTimeMs { postInfo["video_cover_timestamp_ms"] = ms }
         let initBody: [String: Any] = [
-            "post_info": ["title": String(req.caption.prefix(2200)), "privacy_level": wanted],
+            "post_info": postInfo,
             "source_info": ["source": "FILE_UPLOAD", "video_size": size,
                             "chunk_size": plan.chunkSize, "total_chunk_count": plan.count],
         ]

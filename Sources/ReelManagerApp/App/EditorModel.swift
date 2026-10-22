@@ -63,6 +63,8 @@ final class EditorModel: ObservableObject {
                 case let k as WritableKeyPath<EditSettings, CGPoint>: s[keyPath: k] = d[keyPath: k]
                 case let k as WritableKeyPath<EditSettings, OutputAspect>: s[keyPath: k] = d[keyPath: k]
                 case let k as WritableKeyPath<EditSettings, [TimeRange]>: s[keyPath: k] = d[keyPath: k]
+                case let k as WritableKeyPath<EditSettings, String?>: s[keyPath: k] = d[keyPath: k]
+                case let k as WritableKeyPath<EditSettings, Double?>: s[keyPath: k] = d[keyPath: k]
                 default: break
                 }
             }
@@ -170,7 +172,7 @@ final class EditorModel: ObservableObject {
 
                 let thumbRel = "Thumbnails/\(variation.id.uuidString).jpg"
                 let rendered = AVURLAsset(url: out)
-                try? await Thumbnailer.writeThumbnail(for: rendered, at: min(1, settings.outputDuration(sourceDuration: asset.duration) / 2),
+                try? await Thumbnailer.writeThumbnail(for: rendered, at: settings.coverTime ?? min(1, settings.outputDuration(sourceDuration: asset.duration) / 2),
                                                       to: app.store.url(forRelative: thumbRel))
                 variation.exportPath = relative
                 variation.exportPreset = preset

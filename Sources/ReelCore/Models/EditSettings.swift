@@ -44,6 +44,25 @@ public struct EditSettings: Codable, Equatable, Sendable {
     public var saturation: Double = 1
     /// Kelvin. 6500 = neutral.
     public var temperature: Double = 6500
+    /// 0...1, darkens the corners.
+    public var vignette: Double = 0
+    /// 0...1.
+    public var sharpness: Double = 0
+    /// Imported .cube LUT (file name in the library's LUTs folder).
+    public var lutID: String?
+    /// 0...1, how strongly the LUT is applied.
+    public var lutIntensity: Double = 1
+
+    // MARK: Audio
+    /// 0...2, 1 = unchanged, 0 = muted.
+    public var volume: Double = 1
+    /// Seconds of fade at the start and end of the output.
+    public var fadeIn: Double = 0
+    public var fadeOut: Double = 0
+
+    // MARK: Cover
+    /// Frame used as the cover, in seconds on the output timeline. Nil = platform default.
+    public var coverTime: Double?
 
     // MARK: Text
     /// Optional on-screen text burned into the video.
@@ -57,7 +76,28 @@ public struct EditSettings: Codable, Equatable, Sendable {
 
     public init() {}
 
+    /// Missing keys keep their defaults, so variations saved by older
+    /// versions keep loading as new settings are added.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func v<T: Decodable>(_ k: CodingKeys, _ fallback: T) -> T { ((try? c.decodeIfPresent(T.self, forKey: k)) ?? nil) ?? fallback }
+        let d = EditSettings()
+        crop = v(.crop, d.crop); pan = v(.pan, d.pan); zoom = v(.zoom, d.zoom); rotation = v(.rotation, d.rotation)
+        outputAspect = v(.outputAspect, d.outputAspect)
+        brightness = v(.brightness, d.brightness); contrast = v(.contrast, d.contrast)
+        saturation = v(.saturation, d.saturation); temperature = v(.temperature, d.temperature)
+        vignette = v(.vignette, d.vignette); sharpness = v(.sharpness, d.sharpness)
+        lutID = v(.lutID, d.lutID); lutIntensity = v(.lutIntensity, d.lutIntensity)
+        volume = v(.volume, d.volume); fadeIn = v(.fadeIn, d.fadeIn); fadeOut = v(.fadeOut, d.fadeOut)
+        coverTime = v(.coverTime, d.coverTime)
+        overlay = v(.overlay, d.overlay)
+        cuts = v(.cuts, d.cuts); speed = v(.speed, d.speed)
+    }
+
     public static let identity = EditSettings()
+    public static let unitRange: ClosedRange<Double> = 0...1
+    public static let volumeRange: ClosedRange<Double> = 0...2
+    public static let fadeRange: ClosedRange<Double> = 0...5
 
     public static let zoomRange: ClosedRange<Double> = 1...4
     public static let rotationRange: ClosedRange<Double> = -180...180
@@ -78,6 +118,12 @@ public struct EditSettings: Codable, Equatable, Sendable {
         s.saturation = s.saturation.clamped(to: Self.saturationRange)
         s.temperature = s.temperature.clamped(to: Self.temperatureRange)
         s.speed = s.speed.clamped(to: Self.speedRange)
+        s.vignette = s.vignette.clamped(to: Self.unitRange)
+        s.sharpness = s.sharpness.clamped(to: Self.unitRange)
+        s.lutIntensity = s.lutIntensity.clamped(to: Self.unitRange)
+        s.volume = s.volume.clamped(to: Self.volumeRange)
+        s.fadeIn = s.fadeIn.clamped(to: Self.fadeRange)
+        s.fadeOut = s.fadeOut.clamped(to: Self.fadeRange)
         s.pan = CGPoint(x: Double(s.pan.x).clamped(to: -1...1), y: Double(s.pan.y).clamped(to: -1...1))
 
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
@@ -144,6 +190,12 @@ public struct EditSettings: Codable, Equatable, Sendable {
             out.append(String(format: "%d cut(s), %.1fs removed", cuts.count, total))
         }
         if speed != d.speed { out.append(String(format: "Speed %.2f×", speed)) }
+        if vignette != d.vignette { out.append(String(format: "Vignette %.2f", vignette)) }
+        if sharpness != d.sharpness { out.append(String(format: "Sharpen %.2f", sharpness)) }
+        if let l = lutID { out.append("LUT \((l as NSString).deletingPathExtension)") }
+        if volume != d.volume { out.append(volume == 0 ? "Muted" : String(format: "Volume %.0f%%", volume * 100)) }
+        if fadeIn > 0 || fadeOut > 0 { out.append(String(format: "Fade %.1fs / %.1fs", fadeIn, fadeOut)) }
+        if let t = coverTime { out.append(String(format: "Cover at %.1fs", t)) }
         if let o = overlay, !o.isEmpty { out.append("Text \"\(o.text.prefix(24))\"") }
         return out.isEmpty ? ["No edits"] : out
     }

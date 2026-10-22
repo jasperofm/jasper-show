@@ -129,11 +129,13 @@ public struct InstagramClient: PlatformClient {
             }
 
             // 1. Create a resumable Reels container.
-            let createURL = graph.appendingPathComponent("\(igID)/media").with(query: [
+            var params = [
                 "media_type": "REELS", "upload_type": "resumable", "caption": req.caption,
                 // Instagram has no per-post privacy; visibility follows the account's setting.
                 "share_to_feed": "true", "access_token": token,
-            ])
+            ]
+            if let ms = req.coverTimeMs { params["thumb_offset"] = String(ms) }
+            let createURL = graph.appendingPathComponent("\(igID)/media").with(query: params)
             let created = try await http.json(.make(createURL, method: "POST"))
             guard let id = created.string("id"), let uploadURI = created.string("uri").flatMap(URL.init(string:)) else {
                 throw PlatformError(platform: platform, message: "Could not create a media container")

@@ -291,6 +291,7 @@ public final class PostingService {
             let request = PublishRequest(videoURL: fileURL, caption: job.caption,
                                          title: job.title.isEmpty ? variation.name : job.title,
                                          privacy: job.privacy, account: account, resume: job.checkpoint,
+                                         coverTimeMs: variation.settings.coverTime.map { Int($0 * 1000) },
                                          onCheckpoint: { cp in try? store.saveCheckpoint(cp, jobID: jobID) })
             if job.checkpoint != nil {
                 store.log(.system, "Resuming: checking \(account.platform.displayName) for the earlier attempt first.",

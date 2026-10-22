@@ -20,6 +20,8 @@ final class PreviewController: ObservableObject {
     /// When true the preview ignores crop/zoom/pan/rotation so the user can
     /// draw a crop box over the whole frame.
     @Published var showFullFrame = false { didSet { apply(lastSettings, force: true) } }
+    /// Before/after: shows the original colors (framing and timing stay).
+    @Published var showOriginalColors = false { didSet { apply(lastSettings, force: true) } }
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var isPlaying = false
@@ -29,7 +31,11 @@ final class PreviewController: ObservableObject {
     /// Longest edge of preview frames. Lower than export for responsiveness.
     static let previewLongEdge = 1280
 
-    private struct TimingKey: Equatable { let cuts: [TimeRange]; let speed: Double }
+    private struct TimingKey: Equatable {
+        let cuts: [TimeRange]; let speed: Double
+        let volume: Double; let fadeIn: Double; let fadeOut: Double
+        init(_ s: EditSettings) { cuts = s.cuts; speed = s.speed; volume = s.volume; fadeIn = s.fadeIn; fadeOut = s.fadeOut }
+    }
 
     init(sourceURL: URL, settings: EditSettings) {
         source = AVURLAsset(url: sourceURL)
@@ -59,7 +65,7 @@ final class PreviewController: ObservableObject {
         let oldGeometryAspect = aspect(of: box.value)
         box.value = visible
 
-        let key = TimingKey(cuts: settings.cuts, speed: settings.speed)
+        let key = TimingKey(settings)
         if key != timingKey {
             rebuildTask?.cancel()
             rebuildTask = Task { [weak self] in
@@ -97,12 +103,13 @@ final class PreviewController: ObservableObject {
             let comp = try await VariationRenderer.makeComposition(source: source, settings: settings)
             let item = AVPlayerItem(asset: comp)
             item.audioTimePitchAlgorithm = .spectral
+            item.audioMix = VariationRenderer.makeAudioMix(for: comp, settings: settings)
             box.value = visibleSettings(lastSettings)
             item.videoComposition = VariationRenderer.makeVideoComposition(
                 for: comp, sourceSize: sourceSize, box: box, maxLongEdge: Self.previewLongEdge)
             let wasPlaying = player.rate != 0
             player.replaceCurrentItem(with: item)
-            timingKey = TimingKey(cuts: settings.cuts, speed: settings.speed)
+            timingKey = TimingKey(settings)
             duration = comp.duration.seconds
             seek(to: min(keepTime, max(0, duration - 0.05)))
             if wasPlaying { player.play() }
@@ -113,8 +120,13 @@ final class PreviewController: ObservableObject {
     }
 
     private func visibleSettings(_ s: EditSettings) -> EditSettings {
-        guard showFullFrame else { return s }
         var v = s
+        if showOriginalColors {
+            let d = EditSettings.identity
+            v.brightness = d.brightness; v.contrast = d.contrast; v.saturation = d.saturation
+            v.temperature = d.temperature; v.vignette = 0; v.sharpness = 0; v.lutID = nil
+        }
+        guard showFullFrame else { return v }
         v.crop = EditSettings.identity.crop
         v.zoom = 1
         v.pan = .zero
